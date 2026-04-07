@@ -1,0 +1,10 @@
+# =========================================================================
+# Base Extended
+# SID Range: 9000000-9000099
+# =========================================================================
+
+### Detect HTTP protocol anomalies
+alert http any any -> any any (msg:"HTTP - Protocol anomaly detected"; flow:established; http.request_line; pcre:"/^(?![A-Z]+\s+[^\s]+\s+HTTP\/\d\.\d$)/"; classtype:protocol-command-decode; reference:url,https://attack.mitre.org/techniques/T1071/001; sid:9000000; rev:2;)
+
+### Set flowbit for ET.gadu.loginsent
+alert tcp any any -> any any (msg:"ET GADU-GADU Login Sent"; flow:established,to_server; content:"|01 00 00 00|"; depth:4; flowbits:set,ET.gadu.loginsent; flowbits:noalert; classtype:protocol-command-decode; sid:9000001; rev:1;)

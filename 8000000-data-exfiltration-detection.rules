@@ -1,0 +1,910 @@
+# =============================================================================
+# Data Exfiltration Detection — Unified Ruleset
+# Combines Remote Access Tools Detection + VPN Traffic Correlation + Data Exfiltration Detection
+#
+# SID Ranges:
+#   8000000–8000046  Stage 1: VPN Protocol Detection (VPN tunnel detection, xbit setters)
+#   8000047–8000089  Stage 2: Data Exfiltration Detection (exfil pattern detection, cross-protocol correlation)
+#   8000090–8000095  Stage 2b: File-Sharing Exfiltration Correlation (SMB/FTP/SSH/rsync/WebDAV + VPN xbits)
+#   8000096–8000112  Stage 2c: Enhanced Detection (Cloud/SaaS exfil T1567, QUIC, TLS anomalies, NFS/TFTP)
+#   8000113–8000287  Stage 0: Remote Access Tools Detection (RAT protocols + OOB management)
+#
+# Total: 288 rules covering VPN, RAT, and exfiltration patterns.
+#
+# Architecture (Multi-Stage Correlation via xbits):
+#   Stage 0 (SID 8000113–8000287): Detect RAT protocols; set rat.* xbits per src IP.
+#   Stage 1 (SID 8000000–8000046): Detect VPN tunnel establishment; set vpn.* xbits per src IP.
+#   Stage 2 (SID 8000047–8000112): Detect exfiltration patterns; correlate with Stage 1
+#                          vpn.* xbits for high-confidence VPN-tunneled exfil alerts.
+#   Stage 3 (SID 8000281–8000287): High-confidence RAT+exfil or RAT+VPN+exfil correlation.
+#
+#
+# xbits used (track ip_src; expire values in seconds):
+#   --- VPN Detection (Stage 1) ---
+#   vpn.active       — any known-VPN tunnel active from this source (7200s)
+#   vpn.ipsec        — IPSec/IKE session (7200s)
+#   vpn.openvpn      — OpenVPN session (7200s)
+#   vpn.wireguard    — WireGuard session (7200s)
+#   vpn.l2tp         — L2TP session (7200s)
+#   vpn.pptp         — PPTP/GRE session (7200s)
+#   vpn.sstp         — SSTP session (7200s)
+#   vpn.softether    — SoftEther session (7200s)
+#   vpn.anyconnect   — Cisco AnyConnect session (7200s)
+#   vpn.tailscale    — Tailscale session (7200s)
+#   --- Exfil Detection (Stage 2) ---
+#   exfil.dns_tunnel   — DNS tunneling indicator (3600s)
+#   exfil.http_staging — HTTP data staging detected (3600s)
+#   exfil.high_upload  — Large HTTP POST observed (1800s)
+#   exfil.vpn_exfil    — VPN + exfiltration correlation confirmed (7200s)
+#   --- RAT Detection (Stage 0) ---
+#   rat.rdp             — RDP session active (7200s)
+#   rat.vnc             — VNC session active (7200s)
+#   rat.teamviewer      — TeamViewer session active (7200s)
+#   rat.anydesk         — AnyDesk session active (7200s)
+#   rat.logmein         — LogMeIn session active (7200s)
+#   rat.oob.amt         — Intel AMT management session (7200s)
+#   rat.oob.idrac       — Dell iDRAC session (7200s)
+#   rat.oob.ilo         — HP iLO session (7200s)
+#   rat.oob.rsa         — IBM RSA session (7200s)
+#   rat.active          — Any remote access session detected (7200s)
+#   --- File-Sharing Exfil (Stage 2b) ---
+#   fileshare.smb.exfil        — SMB outbound data exfiltration (3600s)      [5000000 rules]
+#   fileshare.smb.lateral      — SMB lateral movement detected (3600s)       [5000000 rules]
+#   fileshare.smb.ransomware   — SMB ransomware activity (3600s)             [5000000 rules]
+#   fileshare.smb.cobaltstrike — SMB Cobalt Strike pipe (3600s)              [5000000 rules]
+#   fileshare.ftp.auth         — FTP authenticated session active (1800s)    [5000000 rules]
+#   fileshare.ftp.exfil        — FTP large outbound transfer (3600s)         [5000000 rules]
+#   fileshare.ssh.exfil        — SSH/SFTP/SCP large outbound transfer (3600s)[5000000 rules]
+#   fileshare.rsync.outbound   — rsync external connection (3600s)           [5000000 rules]
+#   fileshare.nfs.unauthorized — NFS from external network (7200s)           [5000000 rules]
+#   fileshare.webdav.upload    — WebDAV PUT/PROPFIND/MOVE/COPY (3600s)       [5000000 rules]
+#
+# NOTE: xbits are per-host (track ip_src), survive across flows.
+#       flowbits are per-flow only — not usable for cross-session correlation.
+#       All cross-flow correlation rules use xbits.
+#
+# Frameworks:
+#   MITRE ATT&CK: T1048, T1041, T1071, T1572, T1573, T1090, T1030, T1567, T1132, T1537, T1571
+#   NIST SP 800-53 Rev5: SC-7, SI-4, SC-8
+#   CIS Controls v8: Control 13 (Data Protection), Control 12 (Network Mgmt)
+#
+# Suricata Syntax Compliance (7.x):
+#   - depth is an absolute byte position ceiling (depth >= offset + content_len)
+#   - byte_test count >= number of digits in threshold for string,dec mode
+#   - ssl_state multi-value: comma-separated (not pipe)
+#   - xbits for cross-flow state; flowbits for same-flow state only
+#   - PCRE rules always have a content fast-pattern pre-filter
+#   - flow:to_server (no "established") for UDP handshake initiation packets
+#   - ip_proto: only one per rule; use ipv4.hdr sticky buffer (Suricata 7.0+) at
+#     offset 9 for IP protocol field inspection with content negations
+#   - tls_cert_expired: TLS expired certificate anomaly keyword (use flow:established, not to_server)
+#   - tls.cert_subject PCRE: use IP-in-CN pattern to detect self-signed certs (tls_cert_chain_len
+#     is not available in Suricata 8.x)
+#   - app-layer-protocol:quic: native QUIC parser available in Suricata 7.0+
+#
+# Validation (example):
+#   suricata -T -c /etc/suricata/suricata.yaml -S /Volumes/T7\ Touch\ 2T/Documents/Personal\ and\ Family/System\ and\ Application/Development/homelab-servers/pfsense/suricata/8000000-data-exfiltration-detection.rules
+# =============================================================================
+
+# =============================================================================
+# STAGE 0: REMOTE ACCESS TOOLS (RAT) & OUT-OF-BAND MANAGEMENT DETECTION
+# SID 8000113–8000287
+# Detects: RDP, VNC, TeamViewer, AnyDesk, LogMeIn, Intel AMT, Dell iDRAC, HP iLO, IBM RSA
+# These rules trigger xbits (rat.rdp, rat.vnc, rat.teamviewer, rat.active, rat.oob.*)
+# that feed Stage 2 (exfil detection) and Stage 3 (multi-stage correlation) rules
+# =============================================================================
+
+# STAGE 0A: RDP (MS Remote Desktop Protocol) Layer 7 Detection
+# SID 8000113–8000150
+# RFC-equivalent: MS-RDPBCGR (Microsoft proprietary, X.224 based)
+# Reference: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+# =============================================================================
+
+### --------------------------------------------------------------------------
+### 8000113–8000120: RDP Connection Initiation & X.224 Handshake
+### X.224 ISO/OSI Layer 3 transport, TPKT framing (RFC 3092)
+### Connection Request: 03 00 [len] 0E E0 ...
+### --------------------------------------------------------------------------
+
+# RDP X.224 Connection Request on standard port 3389
+# Signature: TPKT (ISO 8649) frame + X.224 Connection Request code (0xE0)
+alert tcp $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP X.224 Connection Request (standard port)"; flow:to_server; content:"|03 00|"; depth:2; fast_pattern; content:"|0e e0|"; offset:4; depth:6; xbits:set,rat.rdp,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1021/001; reference:url,https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/; sid:8000113; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# RDP X.224 Connection Request on non-standard ports (evasion detection)
+# Adversaries often tunnel RDP over alternative ports: 8080, 8443, 15000+, 5985 (WinRM)
+alert tcp $HOME_NET any -> $EXTERNAL_NET ![3389,3390] (msg:"RAT - RDP X.224 Connection Request (non-standard port — evasion)"; flow:to_server; content:"|03 00|"; depth:2; fast_pattern; content:"|0e e0|"; offset:4; depth:6; content:"|01 00 08 00|"; offset:10; depth:14; xbits:set,rat.rdp,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1021/001; reference:url,https://www.cisa.gov/cybersecurity-advisories/aa24-316a; sid:8000114; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# RDP Server Connection Confirm (X.224 0xD0 response)
+# Server responds with Connection Confirm; this marks RDP server-side initiation
+alert tcp $EXTERNAL_NET any -> $HOME_NET 3389 (msg:"RAT - RDP X.224 Connection Confirm (server response)"; flow:to_client; content:"|03 00|"; depth:2; fast_pattern; content:"|06 d0|"; offset:4; depth:6; xbits:set,rat.rdp,track ip_dst,expire 7200; xbits:set,rat.active,track ip_dst,expire 7200; threshold:type threshold, track by_dst, count 1, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000115; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# RDP Security Negotiation Flags (TLS Support Indicator)
+# Byte offset 15 contains negotiation flags: 0x01=RDP Security, 0x08=TLS, 0x04=CredSSP
+alert tcp $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP TLS Negotiation (security layer)"; flow:established,to_server; content:"|03 00|"; depth:2; fast_pattern; content:"|01 00 08 00|"; offset:15; depth:19; xbits:isset,rat.rdp,track ip_src; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/; sid:8000116; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# RDP TLS Handshake (post-X.224)
+# After X.224 negotiation, TLS 1.2 ClientHello appears within the RDP session
+alert tls $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP TLS 1.2 Handshake"; flow:established,to_server; ssl_state:client_hello; content:"TLS 1.2"; fast_pattern; xbits:isset,rat.rdp,track ip_src; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000117; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity Low;)
+
+# RDP on HTTPS port 443 (tunnel evasion)
+# Legitimate RDP services rare on 443; likely tunneled or obfuscated
+alert tcp $HOME_NET any -> $EXTERNAL_NET 443 (msg:"RAT - RDP X.224 on HTTPS port (tunnel evasion)"; flow:to_server; content:"|03 00|"; depth:2; fast_pattern; content:"|0e e0|"; offset:4; depth:6; xbits:set,rat.rdp,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000118; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# RDP High-Bandwidth Data Transfer (potential clipboard exfiltration or file transfer)
+# RDP Graphics Update PDU with sustained high data volume indicates data exfil
+alert tcp $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP high-volume data transfer (possible exfil)"; flow:established,to_server; xbits:isset,rat.rdp,track ip_src; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; sid:8000119; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity High;)
+
+# RDP Asymmetric Traffic (upload >> download, indicates data exfil not screen sharing)
+# Legitimate RDP is bidirectional with slight download bias (display streaming)
+# Outbound >> inbound suggests keyboard/mouse input + file/clipboard transfer out
+alert tcp $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP reverse traffic asymmetry (file exfil pattern)"; flow:established,from_server; xbits:isset,rat.rdp,track ip_src; threshold:type threshold, track by_src, count 3, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1020; sid:8000120; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity High;)
+
+### --------------------------------------------------------------------------
+### 8000121–8000150: RDP Extended Detection & Behavioral Indicators
+### Large session durations, off-hours access, credential patterns
+### --------------------------------------------------------------------------
+
+# RDP Multiple Connection Attempts from Single Source (brute-force or multi-host scanning)
+alert tcp $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP brute-force attempt pattern"; flow:to_server; content:"|03 00|"; depth:2; fast_pattern; content:"|0e e0|"; offset:4; depth:6; threshold:type threshold, track by_src, count 10, seconds 30; classtype:attempted-admin; reference:url,https://attack.mitre.org/techniques/T1110; sid:8000121; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_technique_id T1110, nist_csf PR.AC-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# RDP Session Persistence Indicator (sustained connection >8 hours with data)
+# Legitimate interactive RDP rarely sustains >8 hours of continuous data; likely unattended exfil
+alert tcp $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP sustained session (possible persistent access)"; flow:established,to_server; xbits:isset,rat.rdp,track ip_src; threshold:type threshold, track by_src, count 1, seconds 28800; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1021/001; reference:url,https://attack.mitre.org/techniques/T1041; sid:8000122; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Medium, signature_severity High;)
+
+# RDP Self-Signed Certificate (non-AD joined or compromised AD systems may use self-signed)
+# Attacker may stage RDP listener on victim; self-signed cert is common
+alert tls $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP self-signed certificate (non-domain or attacker-staged)"; flow:established,to_server; ssl_state:server_hello; tls.cert_subject; content:"CN="; fast_pattern; pcre:"/CN=([0-9]{1,3}\\.){3}[0-9]{1,3}|CN=localhost|CN=WIN-/i"; xbits:set,rat.rdp,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000123; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# RDP on Non-Standard Ports with High Volume (strong evasion + data transfer)
+alert tcp $HOME_NET any -> $EXTERNAL_NET ![3389,3390] (msg:"RAT - RDP high-volume evasion traffic"; flow:established; xbits:isset,rat.rdp,track ip_src; threshold:type threshold, track by_src, count 1, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000124; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity High;)
+
+# RDP Session followed by Large File Transfer (T1570 — Lateral Tool Transfer)
+# Adversary stages malware via RDP clipboard or drive mapping
+alert tcp any any -> any any (msg:"RAT - RDP session preceding file transfer staging"; xbits:isset,rat.rdp,track ip_src; xbits:isset,fileshare.smb.exfil,track ip_src; threshold:type threshold, track by_src, count 1, seconds 600; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1570; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000125; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1570, nist_csf PR.AC-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# RDP on SSH Port (tunneled or obfuscated RDP)
+alert tcp $HOME_NET any -> $EXTERNAL_NET 22 (msg:"RAT - RDP X.224 on SSH port (tunnel evasion)"; flow:to_server; content:"|03 00|"; depth:2; fast_pattern; content:"|0e e0|"; offset:4; depth:6; threshold:type threshold, track by_src, count 1, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000126; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# RDP Certificate Issued by Non-Standard CA (potentially attacker-controlled)
+# Legitimate RDP certificates issued by Windows CA; attacker certs issued by custom/self-signed
+alert tls $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP certificate non-standard issuer"; flow:established,to_server; ssl_state:server_hello; tls.cert_issuer; content:!"Microsoft"; content:!"Windows"; content:!"Active Directory"; fast_pattern; threshold:type threshold, track by_src, count 1, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000127; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# RDP Outbound High-Frequency Connections (scanning for additional targets)
+alert tcp $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP outbound scanning pattern"; flow:to_server; threshold:type threshold, track by_src, count 20, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1046; sid:8000128; rev:1; metadata:attack_target Network_Device, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0007, mitre_technique_id T1046, nist_csf DE.CM-7, cis_control 12, performance_impact Medium, signature_severity Medium;)
+
+# RDP Domain Account Credential Usage Pattern (post-compromise credential theft)
+# Detect NTLM v2 challenge-response with cleartext domain\username in TS_INFO_PACKET
+alert tcp $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP domain credential usage"; flow:established,to_server; content:"NTLMSSP"; fast_pattern; xbits:set,rat.rdp,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1078; sid:8000129; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_technique_id T1078, nist_csf PR.AC-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# RDP Clipboard Redirection with Large Data (exfiltration vector)
+# CLIPRDR channel carries clipboard data; large amounts unusual
+alert tcp $HOME_NET any -> $EXTERNAL_NET 3389 (msg:"RAT - RDP clipboard redirection (potential data staging)"; flow:established,to_server; xbits:isset,rat.rdp,track ip_src; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1020; reference:url,https://attack.mitre.org/techniques/T1041; sid:8000130; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity High;)
+
+# =============================================================================
+# STAGE 0B: VNC (Virtual Network Computing / RFB) Detection
+# SID 8000131–8000160
+# RFC 6143: https://tools.ietf.org/html/rfc6143
+# VNC uses RFB (Remote Frame Buffer) Protocol
+# =============================================================================
+
+### --------------------------------------------------------------------------
+### 8000131–8000145: VNC Protocol Handshake & Session Detection
+### RFB Protocol (RFC 6143): Version negotiation, authentication, encoding
+### RFB server sends: "RFB 003.008\n" (11 bytes + LF)
+### --------------------------------------------------------------------------
+
+# VNC Server Greeting (RFB version string on standard port 5900)
+alert tcp any any -> any 5900 (msg:"RAT - VNC RFB server greeting"; flow:to_server,established; content:"RFB 003"; fast_pattern; nocase; depth:20; xbits:set,rat.vnc,track ip_dst,expire 7200; xbits:set,rat.active,track ip_dst,expire 7200; threshold:type threshold, track by_dst, count 1, seconds 60; classtype:policy-violation; reference:url,https://tools.ietf.org/html/rfc6143; reference:url,https://attack.mitre.org/techniques/T1021/005; sid:8000131; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.005, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# VNC Client to Server (reverse: client initiates on non-standard port)
+alert tcp any any -> any ![5900,5901,5902,5903,5904,5905] (msg:"RAT - VNC RFB reverse connection (non-standard port)"; flow:to_server,established; content:"RFB 003"; fast_pattern; nocase; xbits:set,rat.vnc,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:bad-unknown; reference:url,https://tools.ietf.org/html/rfc6143; reference:url,https://attack.mitre.org/techniques/T1021/005; sid:8000132; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.005, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# VNC Standard Ports (5500 = reverse VNC, 5900–5910 = standard VNC)
+alert tcp any any -> any [5500,5900,5901,5902,5903,5904,5905,5906,5907,5908,5909,5910] (msg:"RAT - VNC RFB protocol on standard port"; flow:established; content:"RFB 003"; fast_pattern; nocase; xbits:set,rat.vnc,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://tools.ietf.org/html/rfc6143; reference:url,https://attack.mitre.org/techniques/T1021/005; sid:8000133; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.005, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# VNC FramebufferUpdate message (continuous framebuffer refresh = screen sharing)
+# messageType=0x00 (FramebufferUpdate)
+alert tcp any any -> any any (msg:"RAT - VNC FramebufferUpdate (screen data transfer)"; flow:established; xbits:isset,rat.vnc,track ip_src; content:"|00|"; depth:1; fast_pattern; offset:0; threshold:type threshold, track by_src, count 10, seconds 60; classtype:policy-violation; reference:url,https://tools.ietf.org/html/rfc6143; reference:url,https://attack.mitre.org/techniques/T1048/001; sid:8000134; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1048.001, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity Medium;)
+
+# VNC Sustained Data Transfer (exfiltration via framebuffer or clipboard)
+alert tcp any any -> any any (msg:"RAT - VNC high-volume framebuffer (potential screen capture exfil)"; flow:established; xbits:isset,rat.vnc,track ip_src; threshold:type threshold, track by_src, count 1, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1113; reference:url,https://attack.mitre.org/techniques/T1041; sid:8000135; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity High;)
+
+# VNC Reverse Connection (client connects to attacker, not victim initiates)
+alert tcp any any -> any [5500] (msg:"RAT - VNC reverse connection (attacker listener)"; flow:to_server; content:"RFB 003"; fast_pattern; nocase; xbits:set,rat.vnc,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:bad-unknown; reference:url,https://tools.ietf.org/html/rfc6143; reference:url,https://attack.mitre.org/techniques/T1021/005; sid:8000136; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.005, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# VNC HTTPS Tunnel (port 443 with RFB content)
+alert tcp any any -> any 443 (msg:"RAT - VNC on HTTPS port (tunnel evasion)"; flow:to_server; content:"RFB 003"; fast_pattern; nocase; xbits:set,rat.vnc,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1021/005; sid:8000137; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.005, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# VNC Back-to-Back Sessions (multiple rapid reconnections = automated tool use)
+alert tcp any any -> any any (msg:"RAT - VNC rapid reconnection pattern (automated access)"; flow:to_server; xbits:isset,rat.vnc,track ip_src; threshold:type threshold, track by_src, count 5, seconds 30; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1021/005; sid:8000138; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.005, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# =============================================================================
+# STAGE 0C: TeamViewer, AnyDesk, LogMeIn Detection
+# SID 8000139–8000180
+# These commercial remote access tools have proprietary protocols
+# TeamViewer: Ports 5938 UDP/TCP, 5939 UDP, tunneled over HTTPS 443/8443
+# AnyDesk: Ports 7070 TCP, tunneled over HTTPS 443, SSH 22
+# LogMeIn: Ports HTTPS 443 (web-based), tunneled over standard HTTPS
+# =============================================================================
+
+### --------------------------------------------------------------------------
+### 8000139–8000160: TeamViewer Detection
+### Reference: https://attack.mitre.org/techniques/T1219
+### TeamViewer identifies via: TLS SNI "teamviewer.com", custom protocol on 5938/5939
+### --------------------------------------------------------------------------
+
+# TeamViewer TLS SNI (domain-based detection, most reliable)
+alert tls any any -> any any (msg:"RAT - TeamViewer TLS SNI detected"; flow:established; tls.sni; content:"teamviewer.com"; fast_pattern; nocase; xbits:set,rat.teamviewer,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1219; reference:url,https://www.mandiant.com/resources/blog/post-compromise-persistence; sid:8000139; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1219, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# TeamViewer on Port 5938 (standard listener port)
+alert tcp any any -> any 5938 (msg:"RAT - TeamViewer UDP/TCP listener on standard port"; flow:established; xbits:set,rat.teamviewer,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1219; sid:8000140; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1219, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# TeamViewer High-Volume Transfer on 5938 (file transfer exfiltration)
+alert tcp any any -> any 5938 (msg:"RAT - TeamViewer high-volume file transfer"; flow:established; threshold:type threshold, track by_src, count 1, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1219; sid:8000141; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity High;)
+
+# AnyDesk TLS SNI (domain-based)
+alert tls any any -> any any (msg:"RAT - AnyDesk TLS SNI detected"; flow:established; tls.sni; content:"anydesk.com"; fast_pattern; nocase; xbits:set,rat.anydesk,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1219; reference:url,https://www.crowdstrike.com/blog/global-threat-report-2024; sid:8000142; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1219, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# AnyDesk on Port 7070 (standard listener)
+alert tcp any any -> any 7070 (msg:"RAT - AnyDesk standard listener port"; flow:established; xbits:set,rat.anydesk,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1219; sid:8000143; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1219, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# AnyDesk High-Volume Transfer (exfil via clipboard or file transfer UI)
+alert tcp any any -> any 7070 (msg:"RAT - AnyDesk high-volume data transfer (exfil pattern)"; flow:established; threshold:type threshold, track by_src, count 1, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1219; sid:8000144; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity High;)
+
+# LogMeIn Central TLS SNI
+alert tls any any -> any any (msg:"RAT - LogMeIn TLS SNI detected"; flow:established; tls.sni; content:"logmein.com"; fast_pattern; nocase; xbits:set,rat.logmein,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1219; sid:8000145; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1219, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# LogMeIn Sustained HTTPS Session with High Volume
+alert tcp any any -> any 443 (msg:"RAT - LogMeIn high-volume HTTPS transfer"; flow:established; xbits:isset,rat.logmein,track ip_src; threshold:type threshold, track by_src, count 1, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1219; sid:8000146; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity High;)
+
+# Generic Remote Access Tool Detection via C2-like HTTP Headers (user-agent patterns)
+# Many RAT tools expose identifying user-agent strings or HTTP patterns
+alert http any any -> any any (msg:"RAT - Remote access tool HTTP user-agent detected"; flow:established,to_server; http.user_agent; content:"TeamViewer"; nocase; fast_pattern; xbits:set,rat.teamviewer,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1219; sid:8000147; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1219, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity Medium;)
+
+# =============================================================================
+# STAGE 0D: Out-of-Band Management (AMT, iDRAC, iLO, RSA) Detection
+# SID 8000148–8000190
+# Intel AMT, Dell iDRAC, HP iLO, IBM RSA allow physical layer management
+# Threat: Post-compromise, attackers escalate to management interfaces for persistence
+# =============================================================================
+
+# Intel AMT WebUI on HTTPS port 16992 (out-of-band, runs independently)
+alert tcp any any -> any 16992 (msg:"RAT - Intel AMT WebUI access (out-of-band management)"; flow:established; xbits:set,rat.oob.amt,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://www.intel.com/content/www/us/en/support/articles/000020429/intel-management-engine.html; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000148; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# Intel AMT SOAP/XML API (port 16993, XML-based management)
+alert tcp any any -> any 16993 (msg:"RAT - Intel AMT SOAP/XML management interface"; flow:established; http.method; content:"POST"; fast_pattern; xbits:set,rat.oob.amt,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://www.intel.com/content/www/us/en/support/articles/000020429/intel-management-engine.html; sid:8000149; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# Dell iDRAC WebUI on HTTPS (default 443 or 8443)
+alert tls any any -> any any (msg:"RAT - Dell iDRAC TLS certificate detected"; flow:established; tls.cert_subject; content:"iDRAC"; fast_pattern; nocase; xbits:set,rat.oob.idrac,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://www.dell.com/support/kbdoc/en-uk/000131560/idrac9-security; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000150; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# Dell iDRAC VNC Console on Port 5900 (out-of-band console redirection)
+alert tcp any any -> any 5900 (msg:"RAT - Dell iDRAC VNC console (out-of-band)"; flow:established; xbits:isset,rat.vnc,track ip_src; xbits:set,rat.oob.idrac,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://www.dell.com/support/kbdoc/en-uk/000131560/idrac9-security; sid:8000151; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# HP iLO WebUI (TLS certificate with iLO identifier)
+alert tls any any -> any any (msg:"RAT - HP iLO TLS certificate detected"; flow:established; tls.cert_subject; content:"iLO"; fast_pattern; nocase; xbits:set,rat.oob.ilo,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://support.hpe.com/hpesc/public/docDisplay/docId/a00092048en_us/; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000152; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# HP iLO Direct Console on Port 17988
+alert tcp any any -> any 17988 (msg:"RAT - HP iLO Direct Plus console port"; flow:established; xbits:set,rat.oob.ilo,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://support.hpe.com/hpesc/public/docDisplay/docId/a00092048en_us/; sid:8000153; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# IBM RSA WebUI (TLS certificate with RSA identifier)
+alert tls any any -> any any (msg:"RAT - IBM RSA TLS certificate detected"; flow:established; tls.cert_subject; content:"RSA"; fast_pattern; nocase; xbits:set,rat.oob.rsa,track ip_src,expire 7200; xbits:set,rat.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 60; classtype:policy-violation; reference:url,https://www.ibm.com/docs/en/rsadocs; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000154; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Low, signature_severity High;)
+
+# IPMI Protocol on UDP 623 (all management interfaces use IPMI physics layer)
+# This is a network-level detection for IPMI access (potential compromise of firmware)
+alert udp any any -> any 623 (msg:"RAT - IPMI protocol access (firmware-level management)"; flow:established; content:"|06|"; offset:0; depth:1; fast_pattern; threshold:type threshold, track by_src, count 10, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1021/001; reference:url,https://en.wikipedia.org/wiki/Intelligent_Platform_Management_Interface; sid:8000155; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_technique_id T1021.001, nist_csf DE.CM-1, cis_control 12, performance_impact Medium, signature_severity High;)
+
+# Out-of-Band Management High-Volume Data Transfer (suspicious exfol via management interface)
+alert tcp any any -> any [16992,16993,443,8443,17988] (msg:"RAT - Out-of-band management high-volume transfer"; flow:established; xbits:isset,rat.oob.amt,track ip_src; xbits:isset,rat.oob.idrac,track ip_src; xbits:isset,rat.oob.ilo,track ip_src; xbits:isset,rat.oob.rsa,track ip_src; threshold:type threshold, track by_src, count 1, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; sid:8000156; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact High, signature_severity High;)
+
+# =============================================================================
+# STAGE 3: Remote Access Tool + Exfiltration Correlation (SID 8000281–8000320)
+# These rules correlate RAT detection (Stage 0) with exfiltration patterns (Stage 2)
+# High-confidence alerts only fire when BOTH conditions are met
+# =============================================================================
+
+# Correlation: RDP Session + Large Outbound Data Transfer
+alert tcp any any -> any any (msg:"EXFIL - RDP session with exfil pattern detected"; xbits:isset,rat.rdp,track ip_src; xbits:isset,exfil.http_staging,track ip_src; threshold:type threshold, track by_src, count 1, seconds 600; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1021/001; sid:8000281; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical;)
+
+# Correlation: VNC Session + Large Outbound Data Transfer
+alert tcp any any -> any any (msg:"EXFIL - VNC session with exfil pattern detected"; xbits:isset,rat.vnc,track ip_src; xbits:isset,exfil.http_staging,track ip_src; threshold:type threshold, track by_src, count 1, seconds 600; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1021/005; sid:8000282; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical;)
+
+# Correlation: TeamViewer + Exfil Pattern
+alert tcp any any -> any any (msg:"EXFIL - TeamViewer with data exfil pattern detected"; xbits:isset,rat.teamviewer,track ip_src; xbits:isset,exfil.http_staging,track ip_src; threshold:type threshold, track by_src, count 1, seconds 600; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1219; sid:8000283; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical;)
+
+# Correlation: AnyDesk + Exfil Pattern
+alert tcp any any -> any any (msg:"EXFIL - AnyDesk with data exfil pattern detected"; xbits:isset,rat.anydesk,track ip_src; xbits:isset,exfil.http_staging,track ip_src; threshold:type threshold, track by_src, count 1, seconds 600; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1219; sid:8000284; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical;)
+
+# Correlation: Out-of-Band Management + Exfil Pattern
+alert tcp any any -> any any (msg:"EXFIL - Out-of-band management with exfil pattern (firmware compromise)"; xbits:isset,rat.oob.amt,track ip_src; xbits:isset,rat.oob.idrac,track ip_src; xbits:isset,rat.oob.ilo,track ip_src; xbits:isset,exfil.high_upload,track ip_src; threshold:type threshold, track by_src, count 1, seconds 600; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://www.mandiant.com/resources/blog/post-compromise-persistence; sid:8000285; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical;)
+
+# Correlation: Any RAT + VPN Tunnel + Exfiltration (Triple Correlation = Highest Confidence)
+alert tcp any any -> any any (msg:"EXFIL CRITICAL - RAT + VPN + Exfil correlation (advanced persistent threat)"; xbits:isset,rat.active,track ip_src; xbits:isset,vpn.active,track ip_src; xbits:isset,exfil.http_staging,track ip_src; threshold:type threshold, track by_src, count 1, seconds 600; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1041; reference:url,https://attack.mitre.org/techniques/T1021; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000286; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical;)
+
+# RAT Lateral Movement Pattern (RAT on Source + Exfil on Different Internal Target)
+alert tcp any any -> any any (msg:"EXFIL - RAT lateral movement + exfil correlation"; xbits:isset,rat.active,track ip_src; xbits:isset,fileshare.smb.exfil,track ip_src; threshold:type threshold, track by_src, count 1, seconds 600; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1021; reference:url,https://attack.mitre.org/techniques/T1570; sid:8000287; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1041, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity High;)
+
+# =============================================================================
+# STAGE 1: VPN PROTOCOL DETECTION (SID 8000000–8000046)
+# Purpose: Identify active VPN tunnels and set xbits for Stage 2 correlation.
+# =============================================================================
+
+### --------------------------------------------------------------------------
+### 8000000–8000008: IPSec Protocol Detection
+### RFC 4301 (IPSec), RFC 7296 (IKEv2), RFC 2409 (IKEv1), RFC 3947 (NAT-T)
+### IKE header (28 bytes): InitSPI[8] + RespSPI[8] + NextPayload[1] + Version[1]
+###                         + ExchType[1] + Flags[1] + MsgID[4] + Length[4]
+### Byte offsets: 17=Version, 18=ExchType, 19=Flags
+### IKEv2 Version=0x20; IKE_SA_INIT=0x22; Initiator flag=0x08
+### IKEv1 Version=0x10; MainMode=0x02; Aggressive=0x04
+### --------------------------------------------------------------------------
+
+# IPSec ESP — IP protocol 50 (any direction; marks host as ESP peer)
+alert ip any any -> any any (msg:"VPN - IPSec ESP protocol detected"; ip_proto:50; xbits:set,vpn.ipsec,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://nvd.nist.gov/800-53/Rev5/control/SC-8; reference:url,https://attack.mitre.org/techniques/T1573/001; sid:8000000; rev:4;)
+
+# IPSec AH — IP protocol 51
+alert ip any any -> any any (msg:"VPN - IPSec AH protocol detected"; ip_proto:51; xbits:set,vpn.ipsec,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://nvd.nist.gov/800-53/Rev5/control/SC-8; sid:8000001; rev:4;)
+
+# IKEv2 SA_INIT on UDP/500 — Responder SPI (bytes 8–15) = all zeros on first request
+# Only match initial IKE_SA_INIT; IKE_AUTH has non-zero responder SPI.
+# content at offset:8,depth:16 covers the 8-byte Responder SPI field.
+# content at offset:17,depth:19 aligns Version(0x20)+ExchType(0x22) into 2 bytes.
+alert udp any any -> any 500 (msg:"VPN - IPSec IKEv2 SA_INIT handshake"; flow:to_server; content:"|00 00 00 00 00 00 00 00|"; offset:8; depth:16; fast_pattern; content:"|20 22|"; offset:17; depth:19; content:"|08|"; offset:19; depth:20; xbits:set,vpn.ipsec,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000002; rev:5;)
+
+# IKEv2 IKE_AUTH on UDP/500 — Exchange Type 0x23
+alert udp any any -> any 500 (msg:"VPN - IPSec IKEv2 IKE_AUTH"; flow:to_server; content:"|20 23|"; offset:17; depth:19; fast_pattern; xbits:set,vpn.ipsec,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000003; rev:1;)
+
+# IKEv1 Main Mode on UDP/500 — Version=0x10, Exchange Type=0x02
+alert udp any any -> any 500 (msg:"VPN - IPSec IKEv1 Main Mode"; flow:to_server; content:"|10 02|"; offset:17; depth:19; fast_pattern; xbits:set,vpn.ipsec,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000004; rev:3;)
+
+# IKEv1 Aggressive Mode on UDP/500 — Version=0x10, Exchange Type=0x04
+# Aggressive Mode is deprecated (RFC 8247) and exposes peer identity; flag for review.
+alert udp any any -> any 500 (msg:"VPN - IPSec IKEv1 Aggressive Mode (deprecated, exposes identity)"; flow:to_server; content:"|10 04|"; offset:17; depth:19; fast_pattern; xbits:set,vpn.ipsec,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000005; rev:3;)
+
+# IPSec NAT-T on UDP/4500 — IKE encapsulated with Non-ESP Marker (4 zero bytes)
+# Non-ESP Marker (bytes 0–3 = 0x00000000) followed by IKE; Responder SPI at offset 12 = 0.
+alert udp any any -> any 4500 (msg:"VPN - IPSec IKE over NAT-T (non-ESP marker)"; flow:to_server; content:"|00 00 00 00|"; depth:4; fast_pattern; content:"|00 00 00 00 00 00 00 00|"; offset:12; depth:20; xbits:set,vpn.ipsec,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000006; rev:5;)
+
+# IPSec ESP-in-UDP on port 4500 — non-zero SPI in first 4 bytes (data phase)
+alert udp any any -> any 4500 (msg:"VPN - IPSec ESP-in-UDP data channel"; flow:established; byte_test:1,!=,0,0; dsize:>28; xbits:set,vpn.ipsec,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 10, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000007; rev:3;)
+
+# IPSec high-volume ESP exfil indicator (sustained high packet rate = possible data exfil)
+alert ip any any -> any any (msg:"VPN - IPSec ESP sustained high-volume (possible exfil)"; ip_proto:50; threshold:type both, track by_src, count 30, seconds 10; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1048/001; sid:8000008; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000009–8000015: OpenVPN Detection
+### Wire encoding: opcode_byte = (opcode_int << 3) | key_id
+### P_CONTROL_HARD_RESET_CLIENT_V2: opcode=7, key_id=0 → wire byte 0x38
+### P_DATA_V2: opcode=9, key_id=0 → wire byte 0x48
+### TCP mode: 2-byte big-endian length prefix before each packet
+### UDP mode: opcode byte at offset 0 directly
+### --------------------------------------------------------------------------
+
+# OpenVPN UDP — Hard Reset Client V2 (0x38), Packet ID=0 at offset 9 (after 8-byte SessionID)
+# Packet structure (no tls-auth): [opcode=0x38][SessionID:8][ACKLen:1=0x00][PacketID:4=0]
+# dsize constraint: 14–60 bytes covers the reset packet without TLS payload
+alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:"VPN - OpenVPN UDP Hard Reset Client V2"; flow:to_server; content:"|38|"; depth:1; fast_pattern; content:"|00 00 00 00|"; offset:9; depth:13; dsize:>13; xbits:set,vpn.openvpn,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000009; rev:6;)
+
+# OpenVPN TCP/443 — Hard Reset Client V2 after 2-byte length prefix (offset 2)
+# Packet ID=0 at offset 11 (2-byte length + 1-byte opcode + 8-byte SessionID)
+alert tcp $HOME_NET any -> $EXTERNAL_NET 443 (msg:"VPN - OpenVPN TCP Hard Reset on port 443"; flow:established,to_server; content:"|38|"; offset:2; depth:3; fast_pattern; content:"|00 00 00 00|"; offset:11; depth:15; xbits:set,vpn.openvpn,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000010; rev:5;)
+
+# OpenVPN TCP on standard VPN ports
+alert tcp $HOME_NET any -> $EXTERNAL_NET [1194,1197,1198,8080,8443,9443] (msg:"VPN - OpenVPN TCP Hard Reset on VPN port"; flow:established,to_server; content:"|38|"; offset:2; depth:3; fast_pattern; xbits:set,vpn.openvpn,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000011; rev:1;)
+
+# OpenVPN UDP control channel on standard VPN ports (P_CONTROL_V1 range: 0x20–0x27)
+alert udp any any -> any [1194,1197,1198] (msg:"VPN - OpenVPN UDP control channel"; flow:established; byte_test:1,>=,0x20,0; byte_test:1,<=,0x4F,0; content:"|00|"; offset:9; depth:10; fast_pattern; dsize:>17; xbits:set,vpn.openvpn,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000012; rev:5;)
+
+# OpenVPN TLS certificate with "OpenVPN" in subject (tls-client mode)
+# tls.cert_subject available post-handshake (after server Certificate message)
+alert tls any any -> any any (msg:"VPN - OpenVPN TLS certificate detected"; flow:established,to_server; tls.cert_subject; content:"OpenVPN"; fast_pattern; nocase; xbits:set,vpn.openvpn,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000013; rev:4;)
+
+# OpenVPN P_DATA_V2 sustained data on HTTPS port (TLS app data without HTTP)
+alert tcp $HOME_NET any -> $EXTERNAL_NET 443 (msg:"VPN - OpenVPN P_DATA_V2 sustained data on HTTPS port"; flow:established,to_server; content:"|17 03 03|"; depth:3; fast_pattern; dsize:>200; threshold:type both, track by_src, count 20, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573/002; sid:8000014; rev:3;)
+
+# TLS session without HTTP ALPN on HTTPS port — OpenVPN/VPN-over-TLS indicator
+# Legitimate HTTPS always advertises h2 or http/1.1 via ALPN.
+# Fix: tls.sni content anchor provides MPM prefilter; tls.alpn negations gate on ALPN absence.
+# ssl_state:client_hello scopes evaluation to ClientHello where ALPN extension is present.
+alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:"VPN - TLS without HTTP ALPN on HTTPS port (possible VPN tunnel)"; flow:established,to_server; ssl_state:client_hello; tls.sni; content:"."; fast_pattern; tls.alpn; content:!"h2"; content:!"http/1.1"; content:!"http/1.0"; threshold:type threshold, track by_src, count 5, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573/002; sid:8000015; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000016–8000022: WireGuard Detection
+### Source: WireGuard whitepaper (Donenfeld 2017), Linux kernel messages.h
+### Message types are 4-byte little-endian: type byte + 3 zero-pad bytes.
+###   Type 1 (Handshake Init): |01 00 00 00| + exactly 148 bytes total
+###   Type 2 (Handshake Response): |02 00 00 00| + exactly 92 bytes
+###   Type 3 (Cookie Reply): |03 00 00 00| + exactly 64 bytes
+###   Type 4 (Transport Data): |04 00 00 00| + ≥32 bytes (keepalive=32 exactly)
+### No native Suricata WireGuard app-layer parser in 7.x; use raw UDP matching.
+### --------------------------------------------------------------------------
+
+# WireGuard Handshake Initiation on NON-standard ports (evasion detection)
+# Standard WG ports [51820,51821,51822,51000:52000] are covered by SID 8000021.
+# This rule catches WireGuard tunneled over non-WG ports (evasion pattern).
+alert udp any any -> any ![51820,51821,51822,51000:52000] (msg:"VPN - WireGuard Handshake Initiation (non-standard port — evasion)"; flow:to_server; content:"|01 00 00 00|"; depth:4; fast_pattern; dsize:148; xbits:set,vpn.wireguard,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000016; rev:6;)
+
+# WireGuard Handshake Response — dsize:92 + type |02 00 00 00| (server → client)
+# flow:to_client + track ip_dst marks the initiating client IP (HOME_NET host) for Stage 2 correlation.
+alert udp any any -> any any (msg:"VPN - WireGuard Handshake Response"; flow:to_client; content:"|02 00 00 00|"; depth:4; fast_pattern; dsize:92; xbits:set,vpn.wireguard,track ip_dst,expire 7200; xbits:set,vpn.active,track ip_dst,expire 7200; threshold:type threshold, track by_dst, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000017; rev:6;)
+
+# WireGuard Cookie Reply — dsize:64 + type |03 00 00 00| (server → client rate-limit response)
+alert udp any any -> any any (msg:"VPN - WireGuard Cookie Reply (rate-limit response)"; flow:to_client; content:"|03 00 00 00|"; depth:4; fast_pattern; dsize:64; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000018; rev:4;)
+
+# WireGuard Transport Data — type |04 00 00 00| + min 32 bytes, xbit set to limit noise
+alert udp any any -> any any (msg:"VPN - WireGuard transport data channel"; flow:established; content:"|04 00 00 00|"; depth:4; fast_pattern; dsize:>31; xbits:isset,vpn.wireguard,track ip_src; threshold:type threshold, track by_src, count 10, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000019; rev:6;)
+
+# WireGuard Keepalive — type |04 00 00 00| + exactly 32 bytes (empty payload)
+alert udp any any -> any any (msg:"VPN - WireGuard keepalive (persistent tunnel indicator)"; flow:established; content:"|04 00 00 00|"; depth:4; fast_pattern; dsize:32; threshold:type both, track by_src, count 10, seconds 120; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000020; rev:3;)
+
+# WireGuard on standard ports (51820 default + common alternates)
+alert udp any any -> any [51820,51821,51822,51000:52000] (msg:"VPN - WireGuard Handshake on standard port"; flow:to_server; content:"|01 00 00 00|"; depth:4; fast_pattern; dsize:148; xbits:set,vpn.wireguard,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000021; rev:3;)
+
+# WireGuard excessive rekey — legitimate rekey is every 180s; >5 in 60s = anomalous
+alert udp any any -> any any (msg:"VPN - WireGuard excessive handshake rekey (possible exfil pivoting)"; flow:to_server; content:"|01 00 00 00|"; depth:4; fast_pattern; dsize:148; threshold:type threshold, track by_src, count 5, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1572; sid:8000022; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000023–8000025: SSTP VPN Detection
+### MS-SSTP §3.2.5.1: POST /sra_{GUID}/ with UINT64_MAX Content-Length
+### --------------------------------------------------------------------------
+
+# SSTP negotiation — POST to SSTP GUID endpoint
+alert http $HOME_NET any -> $EXTERNAL_NET 443 (msg:"VPN - SSTP VPN GUID endpoint"; flow:established,to_server; http.uri; content:"/sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/"; fast_pattern; nocase; xbits:set,vpn.sstp,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000023; rev:3;)
+
+# SSTP tunnel POST — UINT64_MAX Content-Length (infinite tunnel indicator)
+alert http $HOME_NET any -> $EXTERNAL_NET 443 (msg:"VPN - SSTP UINT64_MAX Content-Length (infinite POST tunnel)"; flow:established,to_server; http.header; content:"Content-Length: 18446744073709551615"; fast_pattern; nocase; xbits:set,vpn.sstp,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000024; rev:4;)
+
+# SSTP TLS SNI — sra_ UUID subdomain pattern
+alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:"VPN - SSTP TLS SNI UUID pattern"; flow:established,to_server; tls.sni; content:"sra_"; fast_pattern; pcre:"/sra_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i"; xbits:set,vpn.sstp,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000025; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000026–8000029: L2TP Detection (RFC 2661)
+### L2TP header flags at offset 0 (16-bit big-endian):
+###   Bit 15 (T-bit, 0x80 in byte 0): 1=control, 0=data
+###   Bit 14 (L-bit, 0x40): length field present
+### Message Type AVP for SCCRQ (type=1) appears at ~offset 10 in control frames
+### --------------------------------------------------------------------------
+
+# L2TP control message (T-bit set → byte[0] & 0x80 = 0x80)
+alert udp any any -> any 1701 (msg:"VPN - L2TP control message"; flow:to_server; content:"|80|"; depth:1; fast_pattern; byte_test:1,&,0x80,0; xbits:set,vpn.l2tp,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000026; rev:5;)
+
+# L2TP SCCRQ — control + Message Type=1 in AVP
+alert udp any any -> any 1701 (msg:"VPN - L2TP SCCRQ (tunnel establishment)"; flow:to_server; content:"|80|"; depth:1; fast_pattern; byte_test:1,&,0x80,0; content:"|00 01|"; offset:10; depth:12; xbits:set,vpn.l2tp,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 2, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000027; rev:3;)
+
+# L2TP ICRQ — control + Message Type=10 (0x000A) in AVP
+alert udp any any -> any 1701 (msg:"VPN - L2TP ICRQ (call establishment)"; flow:to_server; content:"|80|"; depth:1; fast_pattern; byte_test:1,&,0x80,0; content:"|00 0a|"; offset:10; depth:12; xbits:set,vpn.l2tp,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 2, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000028; rev:3;)
+
+# L2TP data channel high volume (T-bit clear = byte[0] & 0x80 = 0)
+alert udp any any -> any 1701 (msg:"VPN - L2TP data channel high volume"; flow:established; content:"|00|"; depth:1; fast_pattern; byte_test:1,!&,0x80,0; threshold:type both, track by_src, count 20, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000029; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000030–8000034: PPTP/GRE Detection (RFC 2637)
+### PPTP control: TCP/1723; Length(2)+MsgType(2=1)+MagicCookie(4=0x1A2B3C4D)+CtrlMsgType(2)
+### Magic cookie 0x1A2B3C4D at offset 4 uniquely identifies PPTP.
+### GRE (IP proto 47) carries PPP-encapsulated data for PPTP tunnels.
+### --------------------------------------------------------------------------
+
+# PPTP control — magic cookie at offset 4 uniquely identifies PPTP
+alert tcp any any -> any 1723 (msg:"VPN - PPTP control connection (magic cookie)"; flow:established,to_server; content:"|1A 2B 3C 4D|"; offset:4; depth:8; fast_pattern; xbits:set,vpn.pptp,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000030; rev:4;)
+
+# PPTP SCCRQ — Control Message Type=1 (bytes 8–9)
+alert tcp any any -> any 1723 (msg:"VPN - PPTP Start-Control-Connection-Request"; flow:established,to_server; content:"|1A 2B 3C 4D|"; offset:4; depth:8; fast_pattern; content:"|00 01|"; offset:8; depth:10; threshold:type threshold, track by_src, count 2, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000031; rev:3;)
+
+# PPTP Outgoing-Call-Request — Control Message Type=7
+alert tcp any any -> any 1723 (msg:"VPN - PPTP Outgoing-Call-Request"; flow:established,to_server; content:"|1A 2B 3C 4D|"; offset:4; depth:8; fast_pattern; content:"|00 07|"; offset:8; depth:10; threshold:type threshold, track by_src, count 2, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000032; rev:3;)
+
+# GRE (IP proto 47) — used exclusively for PPTP data tunneling
+alert ip any any -> any any (msg:"VPN - GRE protocol (PPTP data tunnel)"; ip_proto:47; xbits:set,vpn.pptp,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 10, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000033; rev:6;)
+
+# GRE with PPP encapsulation (Enhanced GRE for PPTP; PPP proto 0x880B in GRE payload area)
+alert ip any any -> any any (msg:"VPN - GRE Enhanced header with PPP (PPTP data)"; ip_proto:47; content:"|88 0B|"; offset:2; depth:6; fast_pattern; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000034; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000035–8000037: SoftEther VPN Detection
+### SoftEther uses HTTPS for control/auth and POST /VPN with octet-stream for data.
+### Key indicator: X-VPNGATE-NAT HTTP header (SoftEther-specific).
+### --------------------------------------------------------------------------
+
+# SoftEther VPN control POST + VPNGATE header
+alert http $HOME_NET any -> $EXTERNAL_NET [443,992,1194,5555,8888] (msg:"VPN - SoftEther VPN endpoint (/VPN + X-VPNGATE-NAT)"; flow:established,to_server; http.uri; content:"/VPN"; fast_pattern; http.header; content:"X-VPNGATE-NAT"; xbits:set,vpn.softether,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000035; rev:4;)
+
+# SoftEther octet-stream POST (data tunnel phase)
+alert http $HOME_NET any -> $EXTERNAL_NET [443,992,1194,5555,8888] (msg:"VPN - SoftEther VPN octet-stream data tunnel"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.header; content:"Content-Type: application/octet-stream"; nocase; xbits:set,vpn.softether,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000036; rev:4;)
+
+# SoftEther CONNECT proxy mode with VPNGATE header
+alert http $HOME_NET any -> $EXTERNAL_NET [443,992,1194,5555,8888] (msg:"VPN - SoftEther HTTPS proxy connect (proxy mode)"; flow:established,to_server; http.method; content:"CONNECT"; fast_pattern; http.header; content:"X-VPNGATE-NAT"; xbits:set,vpn.softether,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000037; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000038–8000039: Cisco AnyConnect / DTLS Detection
+### AnyConnect uses HTTPS auth + DTLS (UDP/443) for data channel.
+### DTLS record: ContentType(1)+Version(2)+Epoch(2)+SeqNum(6)+Length(2)
+### ContentType 0x17=Application Data, DTLS version 0xFExx (FE=254)
+### --------------------------------------------------------------------------
+
+# AnyConnect HTTP auth portal (CSCOE endpoint + X-Transcend-Version)
+alert http $HOME_NET any -> $EXTERNAL_NET 443 (msg:"VPN - Cisco AnyConnect portal (/CSCOE/)"; flow:established,to_server; http.uri; content:"/CSCOE/"; fast_pattern; http.header; content:"X-Transcend-Version"; xbits:set,vpn.anyconnect,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000038; rev:4;)
+
+# AnyConnect DTLS — ContentType=0x17, DTLS version 0xFE (bytes 0–1 = |17 FE|)
+alert udp $HOME_NET any -> $EXTERNAL_NET 443 (msg:"VPN - Cisco AnyConnect DTLS data channel"; flow:to_server; content:"|17 fe|"; depth:2; fast_pattern; dsize:>28; xbits:set,vpn.anyconnect,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000039; rev:5;)
+
+### --------------------------------------------------------------------------
+### 8000040–8000043: Mesh VPN / Modern Protocols
+### --------------------------------------------------------------------------
+
+# Tailscale DERP relay — FrameServerKey type=0x01, length=0x00000020 (5-byte frame header)
+alert udp any any -> any 41641 (msg:"VPN - Tailscale DERP relay FrameServerKey"; flow:to_server; content:"|01 00 00 00 20|"; depth:5; fast_pattern; xbits:set,vpn.tailscale,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000040; rev:3;)
+
+# Tailscale peer-to-peer WireGuard on port 41641
+alert udp any any -> any 41641 (msg:"VPN - Tailscale WireGuard P2P handshake on DERP port"; flow:to_server; content:"|01 00 00 00|"; depth:4; fast_pattern; dsize:148; xbits:set,vpn.tailscale,track ip_src,expire 7200; xbits:set,vpn.active,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000041; rev:1;)
+
+# ZeroTier UDP/9993 — encrypted framing; verb byte at offset 9 (bits 0–4 = verb type)
+# HELLO=0x01, DATA=0x05, etc.  byte_test checks lower 5 bits are non-zero.
+alert udp any any -> any 9993 (msg:"VPN - ZeroTier protocol (UDP/9993)"; flow:to_server; dsize:>28; byte_test:1,&,0x1F,9; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000042; rev:5;)
+
+# Cloudflare WARP — WireGuard on UDP/2408
+alert udp any any -> any 2408 (msg:"VPN - Cloudflare WARP WireGuard handshake"; flow:to_server; content:"|01 00 00 00|"; depth:4; fast_pattern; dsize:148; threshold:type threshold, track by_src, count 3, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000043; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000044–8000046: Obfuscated/Evasion VPN — TLS Anomalies, DNS Tunneling
+### --------------------------------------------------------------------------
+
+# Shadowsocks/V2Ray-over-TLS on alternate ports — TLS without standard ALPN
+# Fix: tls.sni anchor provides MPM prefilter before tls.alpn negation checks.
+alert tls $HOME_NET any -> $EXTERNAL_NET [8443,8080,8388,2082,2083] (msg:"VPN - Possible Shadowsocks/V2Ray TLS obfuscation (no ALPN, alternate port)"; flow:established,to_server; tls.sni; content:"."; fast_pattern; tls.alpn; content:!"h2"; content:!"http/1.1"; threshold:type threshold, track by_src, count 5, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573/002; sid:8000044; rev:6;)
+
+# Generic VPN TLS cert — "vpn" in cert subject (self-signed VPN CA)
+alert tls any any -> any any (msg:"VPN - TLS certificate subject contains VPN indicator"; flow:established,to_server; tls.cert_subject; content:"vpn"; fast_pattern; nocase; threshold:type threshold, track by_src, count 3, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1573/002; sid:8000045; rev:3;)
+
+# DNS tunneling Stage-1 setter — long-label queries (MPM anchored before PCRE)
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"VPN - DNS tunneling indicator (long-label high-entropy query)"; dns.query; content:"."; isdataat:14,relative; fast_pattern; pcre:"/[a-zA-Z0-9+\/=_-]{30,}/"; xbits:set,exfil.dns_tunnel,track ip_src,expire 3600; threshold:type threshold, track by_src, count 5, seconds 60; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000046; rev:4;)
+
+
+# =============================================================================
+# STAGE 2: DATA EXFILTRATION DETECTION (SID 8000047–8000112)
+# =============================================================================
+
+### --------------------------------------------------------------------------
+### 8000047–8000054: DNS-Based Exfiltration Detection
+### --------------------------------------------------------------------------
+
+# DNS tunneling — long-label pattern (iodine, dnscat2, dns2tcp, heyoka signatures)
+# content anchor before PCRE ensures MPM pre-filter on every rule.
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - DNS tunneling: repeated long-label subdomain structure"; dns.query; content:"."; isdataat:19,relative; fast_pattern; pcre:"/(?:[a-zA-Z0-9+\/=_-]{20,}\.){2,}/"; content:!".arpa"; nocase; threshold:type threshold, track by_src, count 5, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000047; rev:3;)
+
+# DNS high-frequency long-label query — C2 command polling or data exfil channel
+# Fix: isdataat:30,relative requires query FQDN to be >30 chars long, eliminating short-name FP.
+# Threshold raised from 5/60s to 30/60s — normal browsers generate dozens of short queries/min
+# but rarely 30+ queries all with FQDN lengths >30 chars in 60 seconds.
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - DNS high-frequency long-label query (possible TXT exfil or C2 polling)"; dns.query; content:"."; isdataat:30,relative; fast_pattern; threshold:type threshold, track by_src, count 30, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; sid:8000048; rev:4;)
+
+# DNS query to high-abuse-risk TLDs (infrastructure for tunneling/C2)
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - DNS query to high-abuse-risk TLD"; dns.query; content:"."; fast_pattern; pcre:"/\.(xyz|top|club|vip|work|gq|pw|tk|ml|ga|cf|icu|buzz|wtf|rest|hair|feedback|sbs|cyou)$/i"; threshold:type threshold, track by_src, count 5, seconds 120; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000049; rev:4;)
+
+# DNS NXDOMAIN storm — direction corrected to inbound responses from EXTERNAL_NET
+# DNS flags bytes 2–3: byte[3] low nibble = RCODE; NXDOMAIN RCODE=3 → byte[3] = 0x83
+# Flags word |81 83| indicates QR=1,RD=1,RA=1,RCODE=3 (standard NXDOMAIN)
+alert dns $EXTERNAL_NET any -> $HOME_NET any (msg:"EXFIL - High-volume DNS NXDOMAIN responses (tunnel or DGA activity)"; content:"|83|"; offset:3; depth:4; fast_pattern; threshold:type threshold, track by_src, count 50, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; sid:8000050; rev:5;)
+
+# DNS high-entropy label — base32/base64 encoded data (>30 consecutive encoded chars)
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - DNS query high-entropy label (data encoding detected)"; dns.query; content:"."; isdataat:29,relative; fast_pattern; pcre:"/[a-zA-Z0-9+\/=]{30,}/"; threshold:type threshold, track by_src, count 5, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000051; rev:3;)
+
+# DNS excessive subdomain depth — tunneling structure: chunk.chunk.chunk.tunnel.attacker.com
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - DNS excessive subdomain depth (tunneling hierarchy)"; dns.query; content:"."; isdataat:4,relative; fast_pattern; pcre:"/(?:\.[a-zA-Z0-9-]+){5,}\.[a-zA-Z]{2,}$/"; threshold:type threshold, track by_src, count 5, seconds 120; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000052; rev:3;)
+
+# Confirmed DNS tunnel (xbit set by Stage 1 SID 7000093) + repeated high-entropy queries
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Confirmed active DNS tunnel session"; dns.query; content:"."; isdataat:29,relative; fast_pattern; pcre:"/[a-zA-Z0-9+\/=]{30,}/"; xbits:isset,exfil.dns_tunnel,track ip_src; threshold:type threshold, track by_src, count 3, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000053; rev:2;)
+
+# DNS tunnel xbit setter for cross-flow Stage 2 correlation
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - DNS exfil component (setter for cross-flow correlation)"; dns.query; content:"."; isdataat:19,relative; fast_pattern; pcre:"/(?:[a-zA-Z0-9+\/=_-]{20,}\.){2,}/"; xbits:set,exfil.dns_tunnel,track ip_src,expire 3600; noalert; sid:8000054; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000055–8000062: HTTP/HTTPS Anomalous Traffic
+### NOTE: http.content_len sticky buffer contains ASCII decimal content-length.
+### byte_test with string,dec: count must be >= number of digits in threshold.
+### count:10 handles up to 9,999,999,999 bytes (sufficient for all thresholds).
+### --------------------------------------------------------------------------
+
+# Large HTTP POST — >500KB (data staging or direct exfil)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Large HTTP POST (>500KB) detected"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.content_len; byte_test:10,>,500000,0,string,dec; xbits:set,exfil.high_upload,track ip_src,expire 1800; threshold:type threshold, track by_src, count 3, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/002; reference:url,https://nvd.nist.gov/800-53/Rev4/control/SI-4; sid:8000055; rev:3;)
+
+# Automation user-agent (python-requests) + significant upload
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - python-requests user-agent with large upload (>50KB)"; flow:established,to_server; http.user_agent; content:"python-requests"; fast_pattern; http.content_len; byte_test:10,>,50000,0,string,dec; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/001; sid:8000056; rev:3;)
+
+# Scripting/automation tools (curl/wget/PowerShell/Go) + significant upload
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Scripting user-agent with large upload (>50KB)"; flow:established,to_server; http.user_agent; content:"/"; fast_pattern; pcre:"/(?:curl\/|wget\/|PowerShell\/|Go-http-client\/|python-urllib\/)/i"; http.content_len; byte_test:10,>,50000,0,string,dec; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/001; sid:8000057; rev:5;)
+
+# Base64-encoded data in HTTP URI query parameters
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Base64 encoded payload in HTTP URI (data encoding)"; flow:established,to_server; http.uri; content:"="; fast_pattern; pcre:"/[a-zA-Z0-9+\/]{30,}={0,2}(?:&|$|\?)/"; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1132/001; sid:8000058; rev:4;)
+
+# WebDAV verbs outbound — unusual in corporate egress
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Suspicious WebDAV HTTP method outbound"; flow:established,to_server; http.method; content:"FIND"; fast_pattern; pcre:"/^(?:PROPFIND|MKCOL|COPY|MOVE|LOCK|UNLOCK|PROPPATCH)$/"; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/001; sid:8000059; rev:5;)
+
+# Large multipart form upload — file upload exfil (>10MB)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Large multipart file upload (>10MB)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.header; content:"Content-Type: multipart/form-data"; nocase; http.content_len; byte_test:10,>,10000000,0,string,dec; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/002; sid:8000060; rev:4;)
+
+# WebDAV PUT upload — data exfil via PUT >100KB
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - WebDAV PUT upload (>100KB)"; flow:established,to_server; http.method; content:"PUT"; fast_pattern; http.content_len; byte_test:10,>,100000,0,string,dec; threshold:type threshold, track by_src, count 3, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/002; sid:8000061; rev:3;)
+
+# Cloud storage PUT upload — S3/Azure Blob/GCS/OneDrive/Dropbox >1MB (T1567.002)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Large PUT to cloud storage (>1MB) — T1567.002"; flow:established,to_server; http.method; content:"PUT"; fast_pattern; http.host; pcre:"/(?:s3\.amazonaws\.com|blob\.core\.windows\.net|storage\.googleapis\.com|files\.1drv\.com|content\.dropboxapi\.com)/i"; http.content_len; byte_test:10,>,1000000,0,string,dec; xbits:set,exfil.high_upload,track ip_src,expire 1800; threshold:type threshold, track by_src, count 3, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567/002; sid:8000062; rev:2;)
+
+### --------------------------------------------------------------------------
+### 8000063–8000072: Protocol Anomaly and File Transfer Detection
+### --------------------------------------------------------------------------
+
+# HTTP on non-standard port (egress on non-HTTP ports — tunnel indicator)
+# Fix: expanded port exclusion to cover common legitimate HTTP/proxy/dev ports.
+# Excluded: 80 (HTTP), 443 (HTTPS), 8080 (alt-HTTP/proxy), 8443 (alt-HTTPS),
+#           3128 (Squid), 3000/4000/5000/8000/8888 (common dev server defaults).
+alert tcp $HOME_NET any -> $EXTERNAL_NET ![80,443,8080,8443,3128,3000,4000,5000,8000,8888] (msg:"EXFIL - HTTP application-layer on non-standard port (T1571)"; flow:established,to_server; app-layer-protocol:http; threshold:type threshold, track by_src, count 10, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1571; sid:8000063; rev:4;)
+
+# TLS on non-standard port (possible C2 or VPN covert channel)
+# Fix: expanded port exclusion to cover all standard SSL/TLS service ports.
+# Excluded: 443 (HTTPS), 8443 (alt-HTTPS), 993 (IMAPS), 465 (SMTPS), 587 (SMTP+STARTTLS),
+#           995 (POP3S), 636 (LDAPS), 989/990 (FTPS), 5223 (APNS), 853 (DNS-over-TLS).
+alert tcp $HOME_NET any -> $EXTERNAL_NET ![443,8443,993,465,587,995,636,989,990,5223,853] (msg:"EXFIL - TLS application-layer on non-standard port (T1571)"; flow:established,to_server; app-layer-protocol:tls; threshold:type threshold, track by_src, count 10, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1571; reference:url,https://nvd.nist.gov/800-53/Rev5/control/SC-7; sid:8000064; rev:4;)
+
+# ICMP tunneling — large payload (>100 bytes; normal ping = 32–56 bytes)
+# itype:8 restricts to Echo Requests (outbound direction for exfil)
+alert icmp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Large ICMP Echo payload (>100 bytes — possible ICMP tunnel)"; itype:8; dsize:>100; threshold:type threshold, track by_src, count 5, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; reference:url,https://nvd.nist.gov/800-53/Rev4/control/SI-4; sid:8000065; rev:3;)
+
+# ICMP tunneling — high frequency (>10 ICMP Echo/sec sustained indicates tool usage)
+alert icmp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - High-frequency ICMP Echo (>60 in 5s — likely tunnel)"; itype:8; threshold:type both, track by_src, count 60, seconds 5; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; sid:8000066; rev:1;)
+
+# Uncommon IP protocol outbound — covert channel via non-standard IP protocol numbers
+# Fix: Rewrites broken PCRE (which matched payload byte 0, not IP protocol field) to use
+# ipv4.hdr sticky buffer (Suricata 7.0+) targeting IPv4 protocol field at byte offset 9.
+# Excludes ICMP(1), IGMP(2), TCP(6), UDP(17), GRE(47/0x2F), ESP(50/0x32),
+#          AH(51/0x33), IPv6-ICMP(58/0x3A), OSPF(89/0x59).
+# Note: No positive fast_pattern available — rule evaluates all outbound IP packets;
+#       threshold is the primary performance gate. Runs ~O(1) per packet with ipv4.hdr.
+alert ip $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Uncommon IP protocol outbound (potential covert channel T1071)"; ipv4.hdr; content:!"|01|"; offset:9; depth:10; content:!"|02|"; offset:9; depth:10; content:!"|06|"; offset:9; depth:10; content:!"|11|"; offset:9; depth:10; content:!"|2f|"; offset:9; depth:10; content:!"|32|"; offset:9; depth:10; content:!"|33|"; offset:9; depth:10; content:!"|3a|"; offset:9; depth:10; content:!"|59|"; offset:9; depth:10; threshold:type threshold, track by_src, count 10, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071; sid:8000067; rev:7;)
+
+# DNS over non-standard TCP port (DNS-over-TCP tunneling on non-53/853)
+alert tcp $HOME_NET any -> $EXTERNAL_NET !53 (msg:"EXFIL - DNS over non-standard TCP port"; flow:established,to_server; app-layer-protocol:dns; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000068; rev:3;)
+
+# SSH high-volume upload — stream_size:server detects Suricata-measured upload bytes
+# >1MB server-to-client = interactive work; >1MB client-to-server = potential exfil
+alert tcp $HOME_NET any -> $EXTERNAL_NET 22 (msg:"EXFIL - SSH large upload (>1MB) — possible SSH tunneling"; flow:established,to_server; stream_size:server,>,1048576; threshold:type threshold, track by_src, count 3, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1572; sid:8000069; rev:4;)
+
+# SSH on non-standard ports — often used for tunneling
+alert tcp $HOME_NET any -> $EXTERNAL_NET [2222,8022,22222] (msg:"EXFIL - SSH on non-standard port (possible tunnel)"; flow:established,to_server; app-layer-protocol:ssh; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1572; sid:8000070; rev:1;)
+
+### --------------------------------------------------------------------------
+### (8000071–8000072 continued from Protocol Anomaly section above)
+### File Transfer Protocol Exfiltration
+### --------------------------------------------------------------------------
+
+# SMTP excessive outbound — data leak via email attachment
+alert tcp $HOME_NET any -> $EXTERNAL_NET 25 (msg:"EXFIL - Excessive outbound SMTP sessions (possible data leak)"; flow:established,to_server; app-layer-protocol:smtp; threshold:type threshold, track by_src, count 20, seconds 3600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; sid:8000071; rev:4;)
+
+# FTP frequent outbound transfers
+alert tcp $HOME_NET any -> $EXTERNAL_NET 21 (msg:"EXFIL - Frequent outbound FTP data transfer"; flow:established,to_server; app-layer-protocol:ftp; threshold:type threshold, track by_src, count 10, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; reference:url,https://nvd.nist.gov/800-53/Rev4/control/SI-4; sid:8000072; rev:4;)
+
+### --------------------------------------------------------------------------
+### 8000073–8000076: Correlation and Cross-Protocol Exfiltration Rules
+### All cross-flow correlation uses xbits (not flowbits) per Suricata architecture.
+### --------------------------------------------------------------------------
+
+# HTTP data staging — PUT of compressed archive to external host
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Data staging: HTTP PUT of compressed archive"; flow:established,to_server; http.method; content:"PUT"; fast_pattern; http.uri; pcre:"/\.(zip|tar\.gz|tar\.bz2|tgz|rar|7z|bz2|xz|gz)(?:\?|$)/i"; xbits:set,exfil.http_staging,track ip_src,expire 3600; threshold:type threshold, track by_src, count 2, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1074; sid:8000073; rev:3;)
+
+# Staged exfil confirmed — archive PUT followed by large POST from same host
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Large POST following data staging (two-stage exfil confirmed)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.content_len; byte_test:10,>,1000000,0,string,dec; xbits:isset,exfil.http_staging,track ip_src; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048; sid:8000074; rev:3;)
+
+# Multi-protocol exfil — DNS tunnel + HTTP large POST from same source host (xbits)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Multi-protocol exfil: DNS tunnel + HTTP POST from same host"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.content_len; byte_test:10,>,500000,0,string,dec; xbits:isset,exfil.dns_tunnel,track ip_src; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048; sid:8000075; rev:3;)
+
+# HTTP high-upload setter (for cross-rule correlation)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - HTTP large POST tracking setter"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.content_len; byte_test:10,>,500000,0,string,dec; xbits:set,exfil.high_upload,track ip_src,expire 1800; noalert; sid:8000076; rev:3;)
+
+### --------------------------------------------------------------------------
+### 8000077–8000084: HIGH CONFIDENCE — VPN + Exfiltration Correlation
+### These rules fire when Stage 1 (VPN xbit) is set AND exfil is detected.
+### --------------------------------------------------------------------------
+
+# VPN active + DNS long-label queries = DNS tunnel through VPN (T1048/T1572)
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - HIGH CONFIDENCE: DNS tunneling over active VPN session"; dns.query; content:"."; isdataat:19,relative; fast_pattern; pcre:"/(?:[a-zA-Z0-9+\/=_-]{20,}\.){2,}/"; xbits:isset,vpn.active,track ip_src; xbits:set,exfil.vpn_exfil,track ip_src,expire 7200; threshold:type threshold, track by_src, count 3, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; reference:url,https://attack.mitre.org/techniques/T1572; sid:8000077; rev:2;)
+
+# VPN active + large HTTP POST upload (T1048/T1573)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - HIGH CONFIDENCE: Large upload over active VPN session"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.content_len; byte_test:10,>,1000000,0,string,dec; xbits:isset,vpn.active,track ip_src; xbits:set,exfil.vpn_exfil,track ip_src,expire 7200; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048; reference:url,https://attack.mitre.org/techniques/T1573; sid:8000078; rev:2;)
+
+# VPN + DNS exfil xbit correlation (DNS tunnel confirmed from VPN host)
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - HIGH CONFIDENCE: DNS exfil over active VPN overlay"; dns.query; content:"."; isdataat:19,relative; fast_pattern; pcre:"/(?:[a-zA-Z0-9+\/=_-]{20,}\.){2,}/"; xbits:isset,vpn.active,track ip_src; xbits:isset,exfil.dns_tunnel,track ip_src; threshold:type threshold, track by_src, count 3, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; reference:url,https://attack.mitre.org/techniques/T1572; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000079; rev:2;)
+
+# CRITICAL: Staged archive + VPN + large POST (all three indicators from same host)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - CRITICAL: Staged archive upload over VPN (T1048+T1573+T1074)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.content_len; byte_test:10,>,1000000,0,string,dec; xbits:isset,vpn.active,track ip_src; xbits:isset,exfil.http_staging,track ip_src; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048; reference:url,https://attack.mitre.org/techniques/T1573; reference:url,https://attack.mitre.org/techniques/T1074; sid:8000080; rev:2;)
+
+# IPSec high-volume + confirmed VPN session (sustained ESP flood = data exfil over IPSec)
+alert ip $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - HIGH CONFIDENCE: Sustained high-volume over IPSec VPN (T1573.001)"; ip_proto:50; xbits:isset,vpn.ipsec,track ip_src; threshold:type both, track by_src, count 50, seconds 30; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/001; reference:url,https://attack.mitre.org/techniques/T1573/001; sid:8000081; rev:2;)
+
+# WireGuard confirmed + high-volume transport data (sustained exfil over WireGuard)
+alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - HIGH CONFIDENCE: Sustained high-volume over WireGuard VPN (T1573.001)"; content:"|04 00 00 00|"; depth:4; fast_pattern; dsize:>1000; xbits:isset,vpn.wireguard,track ip_src; threshold:type both, track by_src, count 100, seconds 30; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/001; reference:url,https://attack.mitre.org/techniques/T1573/001; sid:8000082; rev:2;)
+
+# OpenVPN + HTTP exfil (OpenVPN session confirmed + large POST)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - HIGH CONFIDENCE: HTTP exfil over confirmed OpenVPN session"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.content_len; byte_test:10,>,1000000,0,string,dec; xbits:isset,vpn.openvpn,track ip_src; threshold:type threshold, track by_src, count 1, seconds 1800; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/002; reference:url,https://attack.mitre.org/techniques/T1573/002; sid:8000083; rev:2;)
+
+# Tailscale/mesh VPN + DNS tunnel
+alert dns $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - HIGH CONFIDENCE: DNS exfil over Tailscale mesh VPN"; dns.query; content:"."; isdataat:19,relative; fast_pattern; pcre:"/(?:[a-zA-Z0-9+\/=_-]{20,}\.){2,}/"; xbits:isset,vpn.tailscale,track ip_src; threshold:type threshold, track by_src, count 3, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; reference:url,https://attack.mitre.org/techniques/T1572; sid:8000084; rev:2;)
+
+### --------------------------------------------------------------------------
+### 8000085–8000089: Advanced Exfiltration Techniques
+### --------------------------------------------------------------------------
+
+# Code repository exfil — large git push over HTTPS (T1567.001)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Possible source code exfil via large git push (>10MB)"; flow:established,to_server; http.user_agent; content:"git/"; fast_pattern; http.method; content:"POST"; http.content_len; byte_test:10,>,10000000,0,string,dec; threshold:type threshold, track by_src, count 3, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567/001; sid:8000085; rev:2;)
+
+# Chunked transfer without Content-Length — bypasses size-based detection
+# Note: uses single http.header buffer with two sequential content checks (content 2 is relative).
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Chunked transfer without Content-Length (size evasion)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.header; content:"Transfer-Encoding: chunked"; nocase; content:!"Content-Length"; nocase; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/002; sid:8000086; rev:3;)
+
+# Long-lived connection with large server-side upload (slow exfil or persistent tunnel)
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Long-lived connection with high upload (slow exfil pattern)"; flow:established,to_server; stream_size:server,>,5242880; threshold:type threshold, track by_src, count 5, seconds 3600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1030; sid:8000087; rev:3;)
+
+# DNS-over-HTTPS tunneling — large POST to DoH endpoint (DNS tunnel via HTTPS port)
+alert http $HOME_NET any -> $EXTERNAL_NET 443 (msg:"EXFIL - DNS-over-HTTPS POST with large body (DNS tunnel via DoH)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.header; content:"application/dns-message"; nocase; http.content_len; byte_test:10,>,4096,0,string,dec; threshold:type threshold, track by_src, count 10, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000088; rev:2;)
+
+# SMTP large attachment — data leak via email (Suricata filesize keyword for SMTP)
+alert smtp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - SMTP large attachment (>5MB — possible data leak)"; flow:established,to_server; filesize:>5242880; threshold:type threshold, track by_src, count 3, seconds 3600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; sid:8000089; rev:2;)
+
+# =============================================================================
+# STAGE 2b: FILE-SHARING EXFILTRATION CORRELATION (SID 8000090–8000095)
+# Purpose: Correlate file-sharing protocol activity (set by 5000000 rules) with
+#          active VPN connections (set by 8000000 Stage 1) for high-confidence
+#          exfiltration alerts. Both xbits must be set for the alert to fire.
+# Note:    xbits are per-ip_src and survive across flows; all rules use
+#          tcp any/any as the transport shell since xbit checks don’t require
+#          a live payload — the match is on state only.
+# =============================================================================
+
+### --------------------------------------------------------------------------
+### 8000090–8000095: File-Sharing Protocol + VPN Correlation
+### --------------------------------------------------------------------------
+
+# SMB Exfiltration + Active VPN — data read from internal SMB share while VPN is active
+# Requires: fileshare.smb.exfil (set by SID 5000005/5000010) + vpn.active (Stage 1)
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL [FILE-SHARE] - SMB exfiltration with active VPN tunnel (T1039+T1048)"; flow:established,to_server; xbits:isset,fileshare.smb.exfil,track ip_src; xbits:isset,vpn.active,track ip_src; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:policy-violation; sid:8000090; rev:1; metadata:attack_target Server, created_at 2026_03_25, deployment Perimeter, mitre_tactic_id TA0009, mitre_technique_id T1039, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical; reference:url,attack.mitre.org/techniques/T1039/;)
+
+# SMB Ransomware + Lateral Movement correlation — active compromise indicator
+# Requires: fileshare.smb.ransomware + fileshare.smb.lateral (both set by 5000000 rules)
+# No VPN required — lateral+ransomware combo is independently high-confidence
+alert tcp $HOME_NET any -> $HOME_NET any (msg:"EXFIL [FILE-SHARE] - SMB ransomware activity with lateral movement (active compromise T1021.002+T1486)"; flow:established; xbits:isset,fileshare.smb.ransomware,track ip_src; xbits:isset,fileshare.smb.lateral,track ip_src; threshold:type threshold, track by_src, count 1, seconds 1800; classtype:policy-violation; sid:8000091; rev:1; metadata:attack_target Server, created_at 2026_03_25, deployment Perimeter, mitre_tactic_id TA0009, mitre_technique_id T1486, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical; reference:url,attack.mitre.org/techniques/T1486/;)
+
+# rsync Outbound + Active VPN — exfiltration via rsync tunnel
+# Requires: fileshare.rsync.outbound (SID 5000160/5000161) + vpn.active (Stage 1)
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL [FILE-SHARE] - rsync exfiltration with active VPN tunnel (T1020+T1048)"; flow:established,to_server; xbits:isset,fileshare.rsync.outbound,track ip_src; xbits:isset,vpn.active,track ip_src; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:policy-violation; sid:8000092; rev:1; metadata:attack_target Server, created_at 2026_03_25, deployment Perimeter, mitre_tactic_id TA0009, mitre_technique_id T1020, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical; reference:url,attack.mitre.org/techniques/T1020/;)
+
+# FTP Exfiltration + Active VPN — large FTP transfer over VPN tunnel
+# Requires: fileshare.ftp.exfil (SID 5000072) + vpn.active (Stage 1)
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL [FILE-SHARE] - FTP large transfer with active VPN tunnel (T1020+T1071.002)"; flow:established,to_server; xbits:isset,fileshare.ftp.exfil,track ip_src; xbits:isset,vpn.active,track ip_src; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:policy-violation; sid:8000093; rev:1; metadata:attack_target Server, created_at 2026_03_25, deployment Perimeter, mitre_tactic_id TA0009, mitre_technique_id T1020, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical; reference:url,attack.mitre.org/techniques/T1020/;)
+
+# SSH/SFTP Exfiltration + Active VPN — large encrypted SSH transfer inside VPN
+# Requires: fileshare.ssh.exfil (SID 5000096) + vpn.active (Stage 1)
+# Double-tunnel pattern (SSH over VPN) is a strong exfiltration indicator
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL [FILE-SHARE] - SSH/SFTP exfiltration with active VPN tunnel (double tunnel T1048+T1573)"; flow:established,to_server; xbits:isset,fileshare.ssh.exfil,track ip_src; xbits:isset,vpn.active,track ip_src; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:policy-violation; sid:8000094; rev:1; metadata:attack_target Server, created_at 2026_03_25, deployment Perimeter, mitre_tactic_id TA0009, mitre_technique_id T1048, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical; reference:url,attack.mitre.org/techniques/T1048/;)
+
+# WebDAV Upload + Active VPN — file upload to external WebDAV server via VPN
+# Requires: fileshare.webdav.upload (SID 5000170/5000173-5000175) + vpn.active (Stage 1)
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL [FILE-SHARE] - WebDAV upload with active VPN tunnel (T1071.001+T1048)"; flow:established,to_server; xbits:isset,fileshare.webdav.upload,track ip_src; xbits:isset,vpn.active,track ip_src; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:policy-violation; sid:8000095; rev:1; metadata:attack_target Server, created_at 2026_03_25, deployment Perimeter, mitre_tactic_id TA0009, mitre_technique_id T1071.001, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical; reference:url,attack.mitre.org/techniques/T1071/001/;)
+
+# =============================================================================
+# STAGE 2c: ENHANCED DETECTION — CLOUD/SAAS EXFILTRATION, MODERN PROTOCOLS
+#           (SID 8000096–8000112)
+# Purpose: Detect exfiltration via cloud storage multipart APIs, SaaS messaging,
+#          source code repositories, paste services, QUIC protocol, TLS anomalies,
+#          standalone NFS, and TFTP outbound (Salt Typhoon active IOC).
+#
+# Frameworks:
+#   MITRE ATT&CK: T1567 (.001 Code Repository, .002 Cloud Storage, .003 Text Storage,
+#                 .004 Webhook), T1537 (Transfer Data to Cloud Account),
+#                 T1071.001/T1071.004, T1571 (Non-Standard Port), T1573.002, T1039
+#   NIST SP 800-53 Rev5: SC-7, SI-4, AU-12
+#   CIS Controls v8: Control 13 (Data Protection)
+#
+# Sources:
+#   CISA/FBI AA24-318A (Salt Typhoon — TFTP device config exfil, Nov 2024)
+#   CISA AA24-038A (Volt Typhoon — SoftEther/cloud pivot, Feb 2024)
+#   RFC 8484 (DNS-over-HTTPS — GET ?dns= parameter format)
+# =============================================================================
+
+### --------------------------------------------------------------------------
+### 8000096–8000100: Cloud Storage and SaaS Messaging Exfiltration (T1567.002, T1537)
+### --------------------------------------------------------------------------
+
+# Cloud storage multipart upload initiation — S3, Azure, GCS, Dropbox (T1567.002)
+# Covers: S3 ?uploads, Azure comp=block, GCS uploadType=resumable, Dropbox upload_session/start
+# Sets exfil.high_upload xbit for cross-rule correlation with VPN xbits.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Cloud storage multipart upload initiation (T1567.002)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.uri; pcre:"/(?:[?&]uploads$|comp=block|upload_session\/start|uploadType=resumable|[?&]uploadId=)/i"; http.host; pcre:"/(?:s3\.amazonaws\.com|blob\.core\.windows\.net|storage\.googleapis\.com|content\.dropboxapi\.com|api\.dropboxapi\.com)/i"; xbits:set,exfil.high_upload,track ip_src,expire 1800; threshold:type threshold, track by_src, count 3, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567/002; sid:8000096; rev:1; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567.002, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity High;)
+
+# Azure Blob block upload — chunked exfil via block-blob PUT API (T1567.002)
+# comp=block&blockid= is the Azure block-blob partial upload endpoint; bypasses size-based detection.
+# Note: http.host buffer is lowercase-normalized; nocase is not needed.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Azure Blob block upload (chunked exfil T1567.002)"; flow:established,to_server; http.method; content:"PUT"; fast_pattern; http.uri; content:"comp=block"; nocase; http.host; content:"blob.core.windows.net"; threshold:type threshold, track by_src, count 5, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567/002; sid:8000097; rev:2; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567.002, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity High;)
+
+# Dropbox chunked upload session — upload_session/start|append|finish (T1567.002)
+# Dropbox Chunked Upload API uses 150MB max chunk size; detect session initiation.
+# Note: http.host buffer is lowercase-normalized; nocase is not needed.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Dropbox chunked upload session (T1567.002)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.host; content:"content.dropboxapi.com"; http.uri; content:"upload_session"; nocase; threshold:type threshold, track by_src, count 3, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567/002; sid:8000098; rev:2; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567.002, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity High;)
+
+# Discord file upload via API — T1071.001 + T1567 (messaging platform exfil)
+# Discord CDN uploads carry multipart/form-data to discord.com/api/v*/channels/*/messages.
+# APT groups and RATs (AsyncRAT, NjRAT) use Discord webhooks and file uploads for exfil.
+# Note: http.host buffer is lowercase-normalized; nocase removed from http.host match.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Discord file upload via API (T1071.001+T1567)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.host; content:"discord.com"; http.uri; pcre:"/\/api\/v\d+\/channels\/\d+\/messages/"; http.header; content:"multipart/form-data"; nocase; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567; sid:8000099; rev:2; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Medium;)
+
+# Telegram Bot API sendDocument — exfil via Telegram file attachment (T1071.001, T1567)
+# InvisibleFerret (Lazarus/Contagious Interview) and commodity RATs use Telegram Bot API for exfil.
+# Note: http.host buffer is lowercase-normalized; nocase removed from http.host match.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Telegram bot sendDocument API call (T1071.001+T1567)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.host; content:"api.telegram.org"; http.uri; content:"/sendDocument"; nocase; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567; sid:8000100; rev:2; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity High;)
+
+### --------------------------------------------------------------------------
+### 8000101–8000104: Source Code Repository and Paste Service Exfiltration (T1567.001, T1567.003)
+### --------------------------------------------------------------------------
+
+# Git push via HTTPS — git-receive-pack URI is the definitive push indicator (T1567.001)
+# Matches both the POST push body and the GET discovery probe regardless of user-agent.
+# Catches automated CI/CD pipelines repurposed for exfil (user-agent agnostic).
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Git push (git-receive-pack URI) to external repository (T1567.001)"; flow:established,to_server; http.uri; content:"git-receive-pack"; fast_pattern; nocase; threshold:type threshold, track by_src, count 3, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567/001; sid:8000101; rev:1; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567.001, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity High;)
+
+# Git push pre-discovery — info/refs?service=git-receive-pack (T1567.001)
+# This GET probe always precedes an HTTPS git push; separate rule for lower-severity logging.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Git push discovery probe (info/refs?service=git-receive-pack) T1567.001"; flow:established,to_server; http.method; content:"GET"; fast_pattern; http.uri; content:"git-receive-pack"; nocase; threshold:type threshold, track by_src, count 3, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567/001; sid:8000102; rev:1; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567.001, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Medium;)
+
+# Paste service large POST — exfiltration via text paste sites >4KB (T1567.003)
+# Covers pastebin.com, paste.ee, hastebin.com, rentry.co, ghostbin.co, gist.github.com, dpaste.com.
+# Threshold: 4096 bytes filters out normal pastes; data exfil typically >4KB.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Large POST to paste service (T1567.003 data staging/exfil)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.host; pcre:"/(?:pastebin\.com|paste\.ee|hastebin\.com|rentry\.co|ghostbin\.co|gist\.github\.com|dpaste\.com|bin\.re|privatebin\.net)/i"; http.content_len; byte_test:10,>,4096,0,string,dec; threshold:type threshold, track by_src, count 3, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567/003; sid:8000103; rev:1; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567.003, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Medium;)
+
+# DNS-over-HTTPS GET with wire-format ?dns= parameter — DoH GET exfil/tunnel (T1071.004)
+# RFC 8484 §4.1: DoH GET requests encode DNS messages in base64url in the ?dns= query param.
+# A legitimate DoH GET has short encoded queries; >20 base64url chars after ?dns= = data encoding.
+# Note: pcre operates on the same http.uri sticky buffer set by the preceding content match.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - DNS-over-HTTPS GET request with wire-format query (T1071.004)"; flow:established,to_server; http.method; content:"GET"; http.uri; content:"?dns="; fast_pattern; nocase; pcre:"/\?dns=[A-Za-z0-9\-_]{20,}/"; threshold:type threshold, track by_src, count 10, seconds 60; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1071/004; sid:8000104; rev:2; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1071.004, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Medium;)
+
+### --------------------------------------------------------------------------
+### 8000105–8000107: QUIC Protocol Exfiltration and TLS Certificate Anomalies
+###                  (T1571, T1573.002)
+### --------------------------------------------------------------------------
+
+# QUIC high-volume data on UDP/443 — exfil bypassing TCP-based inspection rules (T1571)
+# Suricata 7.0+ has native QUIC app-layer parser (app-layer.protocols.quic in suricata.yaml).
+# threshold:type both fires once per 30s burst of 200+ QUIC packets to same external host.
+alert udp $HOME_NET any -> $EXTERNAL_NET 443 (msg:"EXFIL - High-volume QUIC traffic on UDP/443 (possible exfil bypass T1571)"; flow:to_server; app-layer-protocol:quic; threshold:type both, track by_src, count 200, seconds 30; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1571; sid:8000105; rev:1; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1571, nist_csf DE.CM-1, cis_control 13, performance_impact Medium, signature_severity Medium;)
+
+# TLS certificate with IP address as Common Name — strong self-signed cert indicator (T1573.002)
+# Legitimate public CAs never issue certs with bare IP addresses as CN; this pattern is
+# characteristic of attacker-generated self-signed certs for C2 servers and VPN endpoints.
+# Note: tls_cert_chain_len is not available in Suricata 8.x; IP-in-CN PCRE is used instead.
+alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - TLS certificate CN is IP address (self-signed C2/VPN indicator T1573.002)"; flow:established,to_server; tls.cert_subject; content:"CN="; fast_pattern; pcre:"/CN=(?:\d{1,3}\.){3}\d{1,3}/"; threshold:type threshold, track by_src, count 3, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1573/002; sid:8000106; rev:2; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1573.002, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Medium;)
+
+# TLS expired certificate from external server — possible C2/VPN infra (T1573.002)
+# Legitimate services renew certificates promptly; expired certs suggest attacker-controlled infra.
+# Fix: tls_cert_expired inspects the server cert (server→client direction); using flow:established
+# with no directional sticky buffer (no tls.sni) avoids Suricata 8.x direction conflict error.
+alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - TLS expired certificate from external server (C2/VPN self-signed infra T1573.002)"; flow:established; tls_cert_expired; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1573/002; sid:8000107; rev:3; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1573.002, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Low;)
+
+### --------------------------------------------------------------------------
+### 8000108–8000112: NFS Unauthorized Access and TFTP Outbound (T1039, T1048.003)
+### --------------------------------------------------------------------------
+
+# NFS TCP from external network — unauthorized NFSv3/v4 mount/access (T1039)
+# NFS must never traverse the perimeter; any external source on TCP/2049 is high-confidence IOC.
+# Requires: app-layer.protocols.nfs.enabled: yes in suricata.yaml for app-layer detection.
+alert tcp $EXTERNAL_NET any -> $HOME_NET 2049 (msg:"EXFIL - NFS TCP access from external network (unauthorized T1039)"; flow:established,to_server; app-layer-protocol:nfs; threshold:type threshold, track by_src, count 3, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1039; sid:8000108; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0009, mitre_technique_id T1039, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical;)
+
+# NFS UDP from external network — unauthorized legacy NFSv2/v3 access (T1039)
+# NFSv2/v3 can use UDP/2049; NFS over UDP should never originate from EXTERNAL_NET.
+alert udp $EXTERNAL_NET any -> $HOME_NET 2049 (msg:"EXFIL - NFS UDP access from external network (unauthorized T1039)"; threshold:type threshold, track by_src, count 5, seconds 300; classtype:policy-violation; reference:url,https://attack.mitre.org/techniques/T1039; sid:8000109; rev:1; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0009, mitre_technique_id T1039, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Critical;)
+
+# OneDrive upload session creation — Microsoft Graph API fragment upload (T1567.002)
+# createUploadSession endpoint initiates resumable uploads up to 4GB per session.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - OneDrive resumable upload session (T1567.002)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.host; pcre:"/(?:api\.onedrive\.com|graph\.microsoft\.com|onedrive\.live\.com)/i"; http.uri; content:"createUploadSession"; nocase; threshold:type threshold, track by_src, count 3, seconds 600; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567/002; sid:8000110; rev:1; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567.002, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity High;)
+
+# Slack file upload API — exfil via Slack workspace file sharing (T1567, T1071.001)
+# Covers both legacy files.upload and new Files Upload v2 initiate endpoint.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"EXFIL - Slack file upload API call (T1071.001+T1567)"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.host; pcre:"/(?:files\.slack\.com|slack\.com)/i"; http.uri; pcre:"/(?:files-upload|files\.upload|upload\/v2\/initiate)/i"; threshold:type threshold, track by_src, count 5, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1567; sid:8000111; rev:1; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1567, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity Medium;)
+
+# TFTP outbound write request — Salt Typhoon active IOC; workstations must not originate TFTP WRQ
+# Source: CISA/FBI AA24-318A (Nov 2024) — Salt Typhoon used TFTP to exfil network device configs.
+# TFTP WRQ opcode 0x0002 at bytes 0-1; TFTP WRQ must never originate from internal workstations.
+# TFTP is UDP—no flow tracking possible; any WRQ to $EXTERNAL_NET is anomalous.
+alert udp $HOME_NET any -> $EXTERNAL_NET 69 (msg:"EXFIL - TFTP outbound Write Request (Salt Typhoon active IOC T1048.003)"; flow:to_server; content:"|00 02|"; depth:2; fast_pattern; threshold:type threshold, track by_src, count 3, seconds 300; classtype:bad-unknown; reference:url,https://attack.mitre.org/techniques/T1048/003; reference:url,https://www.cisa.gov/news-events/cybersecurity-advisories/aa24-318a; sid:8000112; rev:1; metadata:attack_target Network_Device, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0010, mitre_technique_id T1048.003, nist_csf DE.CM-1, cis_control 13, performance_impact Low, signature_severity High;)
