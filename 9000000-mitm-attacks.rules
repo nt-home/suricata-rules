@@ -65,7 +65,6 @@
 # Revision: 1
 # =============================================================================
 
-
 # =============================================================================
 # SECTION 1: ARP SPOOFING — SUPPLEMENTAL HIGH-CONFIDENCE RULES (9000100–9000109)
 #
@@ -85,51 +84,18 @@
 # SID 9000100: ARP poison storm — burst of >=20 ARP replies/10 s from one source.
 # This threshold is above all legitimate use cases (DHCP failover, VM migration).
 # Tools: arpspoof -i <iface> -t <target> <gateway> sends replies at ~10–30 pps.
-alert arp any any -> any any ( \
-    msg:"MITM-ARP: Very high rate ARP replies detected - arpspoof/ettercap/bettercap tool signature"; \
-    arp.opcode:2; \
-    threshold:type threshold, track by_src, count 20, seconds 10; \
-    classtype:network-scan; \
-    reference:url,attack.mitre.org/techniques/T1557/002; \
-    reference:url,https://tools.ietf.org/html/rfc826; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, \
-        performance_impact Low, signature_severity Critical, confidence High; \
-    sid:9000100; rev:1;)
+alert arp any any -> any any ( msg:"MITM-ARP: Very high rate ARP replies detected - arpspoof/ettercap/bettercap tool signature"; arp.opcode:2; threshold:type threshold, track by_src, count 20, seconds 10; classtype:network-scan; reference:url,attack.mitre.org/techniques/T1557/002; reference:url,https://tools.ietf.org/html/rfc826; metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, performance_impact Low, signature_severity Critical, confidence High; sid:9000100; rev:1;)
 
 # SID 9000101: Gratuitous ARP storm — >=10 gratuitous ARPs per 30 s from same source.
 # A gratuitous ARP (opcode 2, sender IP == target IP) is legitimate for IP conflict
 # detection (RFC 5227) but should not exceed 1–2 per minute under normal conditions.
-alert arp any any -> any any ( \
-    msg:"MITM-ARP: Gratuitous ARP storm detected - potential ARP cache mass-poisoning"; \
-    arp.opcode:2; \
-    threshold:type threshold, track by_src, count 10, seconds 30; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1557/002; \
-    reference:url,https://tools.ietf.org/html/rfc5227; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000101; rev:1;)
+alert arp any any -> any any ( msg:"MITM-ARP: Gratuitous ARP storm detected - potential ARP cache mass-poisoning"; arp.opcode:2; threshold:type threshold, track by_src, count 10, seconds 30; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1557/002; reference:url,https://tools.ietf.org/html/rfc5227; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, performance_impact Low, signature_severity High, confidence High; sid:9000101; rev:1;)
 
 # SID 9000102: ARP reply with Ethernet source MAC != ARP sender hardware address.
 # In a spoofed ARP the Ethernet frame src MAC and ARP sender MAC differ — the
 # attacker uses its real MAC at L2 but forges a victim MAC inside ARP fields.
 # Note: Detected via byte comparison; Suricata 7 supports arp.src_mac keyword.
-alert arp any any -> any any ( \
-    msg:"MITM-ARP: Ethernet src MAC != ARP sender MAC - forged ARP detected"; \
-    arp.opcode:2; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/002; \
-    reference:url,https://tools.ietf.org/html/rfc826; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000102; rev:1;)
-
+alert arp any any -> any any ( msg:"MITM-ARP: Ethernet src MAC != ARP sender MAC - forged ARP detected"; arp.opcode:2; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/002; reference:url,https://tools.ietf.org/html/rfc826; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, performance_impact Low, signature_severity High, confidence High; sid:9000102; rev:1;)
 
 # =============================================================================
 # SECTION 2: DHCP SPOOFING / ROGUE DHCP SERVER (9000110–9000119)
@@ -152,102 +118,28 @@ alert arp any any -> any any ( \
 # In a properly configured network only 1–2 DHCP servers exist per subnet.
 # This rule sets an xbit so downstream rules can correlate multiple competing OFFERs.
 # Tuning: whitelist your authorised DHCP server IPs using suppress rules.
-alert udp any 67 -> any 68 ( \
-    msg:"MITM-DHCP: DHCP OFFER detected - track for rogue server analysis"; \
-    flow:to_client; \
-    content:"|02|"; offset:0; depth:1; \
-    content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; \
-    content:"|35 01 02|"; \
-    xbits:set,mitm.dhcp_rogue,track ip_src,expire 3600; \
-    threshold:type threshold, track by_src, count 1, seconds 300; \
-    classtype:policy-violation; \
-    reference:url,attack.mitre.org/techniques/T1557/003; \
-    reference:url,https://tools.ietf.org/html/rfc2131; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, \
-        performance_impact Low, signature_severity Medium, confidence Medium; \
-    sid:9000110; rev:1;)
+alert udp any 67 -> any 68 ( msg:"MITM-DHCP: DHCP OFFER detected - track for rogue server analysis"; flow:to_client; content:"|02|"; offset:0; depth:1; content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; content:"|35 01 02|"; xbits:set,mitm.dhcp_rogue,track ip_src,expire 3600; threshold:type threshold, track by_src, count 1, seconds 300; classtype:policy-violation; reference:url,attack.mitre.org/techniques/T1557/003; reference:url,https://tools.ietf.org/html/rfc2131; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, performance_impact Low, signature_severity Medium, confidence Medium; sid:9000110; rev:1;)
 
 # SID 9000111: Multiple competing DHCP OFFERs for the same transaction (race condition).
 # A legitimate network produces at most 1–2 OFFERs per DISCOVER. Attackers
 # race the legitimate server to deliver their evil OFFER first.
-alert udp any 67 -> any 68 ( \
-    msg:"MITM-DHCP: Multiple DHCP OFFERs for same subnet - possible rogue DHCP server"; \
-    flow:to_client; \
-    content:"|02|"; offset:0; depth:1; \
-    content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; \
-    content:"|35 01 02|"; \
-    xbits:isset,mitm.dhcp_rogue,track ip_src; \
-    threshold:type both, track by_dst, count 2, seconds 10; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/003; \
-    reference:url,https://tools.ietf.org/html/rfc2131; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000111; rev:1;)
+alert udp any 67 -> any 68 ( msg:"MITM-DHCP: Multiple DHCP OFFERs for same subnet - possible rogue DHCP server"; flow:to_client; content:"|02|"; offset:0; depth:1; content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; content:"|35 01 02|"; xbits:isset,mitm.dhcp_rogue,track ip_src; threshold:type both, track by_dst, count 2, seconds 10; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/003; reference:url,https://tools.ietf.org/html/rfc2131; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, performance_impact Low, signature_severity High, confidence High; sid:9000111; rev:1;)
 
 # SID 9000112: DHCP ACK with abnormally short lease time (< 300 s = 5 minutes).
 # Attackers use short leases to maintain persistent MITM even if victim renews.
 # Legitimate servers almost never issue leases shorter than 5 minutes.
 # Option 51 (lease time): tag=0x33, length=0x04, value=4-byte big-endian seconds.
-alert udp any 67 -> any 68 ( \
-    msg:"MITM-DHCP: DHCP ACK with very short lease time - possible rogue DHCP server"; \
-    flow:to_client; \
-    content:"|02|"; offset:0; depth:1; \
-    content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; \
-    content:"|35 01 05|"; \
-    content:"|33 04|"; distance:0; \
-    byte_test:4,<,300,0,relative; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/003; \
-    reference:url,https://tools.ietf.org/html/rfc2131; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000112; rev:1;)
+alert udp any 67 -> any 68 ( msg:"MITM-DHCP: DHCP ACK with very short lease time - possible rogue DHCP server"; flow:to_client; content:"|02|"; offset:0; depth:1; content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; content:"|35 01 05|"; content:"|33 04|"; distance:0; byte_test:4,<,300,0,relative; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/003; reference:url,https://tools.ietf.org/html/rfc2131; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, performance_impact Low, signature_severity High, confidence High; sid:9000112; rev:1;)
 
 # SID 9000113: DHCP starvation attack — rapid DISCOVER flood from same source.
 # Tools like yersinia/dhcpig send >10 DISCOVER messages per second with randomised
 # client MACs to exhaust the DHCP pool, enabling a subsequent rogue-server attack.
-alert udp any any -> any 67 ( \
-    msg:"MITM-DHCP: DHCP DISCOVER flood detected - possible DHCP starvation attack"; \
-    flow:to_server; \
-    content:"|01|"; offset:0; depth:1; \
-    content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; \
-    content:"|35 01 01|"; \
-    threshold:type threshold, track by_src, count 20, seconds 10; \
-    classtype:attempted-dos; \
-    reference:url,attack.mitre.org/techniques/T1557/003; \
-    reference:url,https://tools.ietf.org/html/rfc2131; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0040, mitre_tactic_name Impact, \
-        mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000113; rev:1;)
+alert udp any any -> any 67 ( msg:"MITM-DHCP: DHCP DISCOVER flood detected - possible DHCP starvation attack"; flow:to_server; content:"|01|"; offset:0; depth:1; content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; content:"|35 01 01|"; threshold:type threshold, track by_src, count 20, seconds 10; classtype:attempted-dos; reference:url,attack.mitre.org/techniques/T1557/003; reference:url,https://tools.ietf.org/html/rfc2131; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0040, mitre_tactic_name Impact, mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, performance_impact Low, signature_severity High, confidence High; sid:9000113; rev:1;)
 
 # SID 9000114: DHCP REQUEST directed to broadcast — client accepted rogue server offer.
 # After receiving a DHCP OFFER, the client broadcasts a REQUEST specifying the
 # chosen server via Option 54 (Server Identifier). Correlated with mitm.dhcp_rogue xbit.
-alert udp any any -> any 67 ( \
-    msg:"MITM-DHCP: DHCP REQUEST broadcast after rogue OFFER xbit - possible client compromise"; \
-    flow:to_server; \
-    content:"|01|"; offset:0; depth:1; \
-    content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; \
-    content:"|35 01 03|"; \
-    xbits:isset,mitm.dhcp_rogue,track ip_dst; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/003; \
-    reference:url,https://tools.ietf.org/html/rfc2131; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000114; rev:1;)
-
+alert udp any any -> any 67 ( msg:"MITM-DHCP: DHCP REQUEST broadcast after rogue OFFER xbit - possible client compromise"; flow:to_server; content:"|01|"; offset:0; depth:1; content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; content:"|35 01 03|"; xbits:isset,mitm.dhcp_rogue,track ip_dst; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/003; reference:url,https://tools.ietf.org/html/rfc2131; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, performance_impact Low, signature_severity High, confidence Medium; sid:9000114; rev:1;)
 
 # =============================================================================
 # SECTION 3: DNS SPOOFING & CACHE POISONING — SUPPLEMENTAL (9000120–9000129)
@@ -267,72 +159,26 @@ alert udp any any -> any 67 ( \
 # The Kaminsky attack floods a resolver with identical queries for a
 # sub-domain while guessing the TXID+source-port pair in parallel responses.
 # A burst of >= 30 identical queries within 5 s from the same source is anomalous.
-alert dns $HOME_NET any -> any 53 ( \
-    msg:"MITM-DNS: DNS query flood to same resolver - Kaminsky birthday attack pattern"; \
-    threshold:type threshold, track by_src, count 30, seconds 5; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/001; \
-    reference:url,https://nvd.nist.gov/vuln/detail/CVE-2008-1447; \
-    reference:url,https://tools.ietf.org/html/rfc5452; \
-    metadata:attack_target DNS_Server, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000120; rev:1;)
+alert dns $HOME_NET any -> any 53 ( msg:"MITM-DNS: DNS query flood to same resolver - Kaminsky birthday attack pattern"; threshold:type threshold, track by_src, count 30, seconds 5; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/001; reference:url,https://nvd.nist.gov/vuln/detail/CVE-2008-1447; reference:url,https://tools.ietf.org/html/rfc5452; metadata:attack_target DNS_Server, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, performance_impact Low, signature_severity High, confidence Medium; sid:9000120; rev:1;)
 
 # SID 9000121: DNS response from privileged source port (< 1024).
 # RFC 5452 mandates high random source ports for resolver queries to mitigate
 # TXID prediction. A DNS response arriving from port < 1024 (other than 53)
 # indicates either an old/misconfigured resolver or a spoofing tool.
-alert udp any [0:1023] -> $HOME_NET any ( \
-    msg:"MITM-DNS: DNS response from privileged source port - possible spoofed DNS"; \
-    content:"|00|"; offset:2; depth:3; \
-    byte_test:1,&,0x80,2; \
-    threshold:type threshold, track by_src, count 3, seconds 60; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/001; \
-    reference:url,https://tools.ietf.org/html/rfc5452; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000121; rev:1;)
+alert udp any [0:1023] -> $HOME_NET any ( msg:"MITM-DNS: DNS response from privileged source port - possible spoofed DNS"; content:"|00|"; offset:2; depth:3; byte_test:1,&,0x80,2; threshold:type threshold, track by_src, count 3, seconds 60; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/001; reference:url,https://tools.ietf.org/html/rfc5452; metadata:attack_target Client, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, performance_impact Low, signature_severity High, confidence High; sid:9000121; rev:1;)
 
 # SID 9000122: DNS response with QR=1 but also RD=1 (recursion desired in a response).
 # QR (bit 15) = 1 (response) and RD (bit 8) = 1 (recursion desired) in the same
 # message is an unusual combination: resolvers strip RD from responses. Spoofed
 # responses crafted by tools like dnsspoof may copy query flags verbatim.
 # DNS flags word at byte offset 2. Mask 0x8100 selects QR+RD simultaneously.
-alert udp any 53 -> $HOME_NET any ( \
-    msg:"MITM-DNS: DNS response with RD flag set - spoofed DNS response indicator"; \
-    byte_test:2,&,0x8100,2; \
-    threshold:type threshold, track by_src, count 5, seconds 60; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/001; \
-    reference:url,https://tools.ietf.org/html/rfc1035; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, \
-        performance_impact Low, signature_severity Medium, confidence Medium; \
-    sid:9000122; rev:1;)
+alert udp any 53 -> $HOME_NET any ( msg:"MITM-DNS: DNS response with RD flag set - spoofed DNS response indicator"; byte_test:2,&,0x8100,2; threshold:type threshold, track by_src, count 5, seconds 60; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/001; reference:url,https://tools.ietf.org/html/rfc1035; metadata:attack_target Client, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, performance_impact Low, signature_severity Medium, confidence Medium; sid:9000122; rev:1;)
 
 # SID 9000123: Multiple DNS responses to the same destination within 3 seconds.
 # Legitimate DNS delivers exactly one response per query (unless ANYCAST).
 # A race-condition poisoning attack (Kaminsky variant) delivers multiple competing
 # responses in rapid succession hoping one matches the pending TXID.
-alert udp any 53 -> $HOME_NET any ( \
-    msg:"MITM-DNS: Multiple rapid DNS responses to same client - cache poisoning race attack"; \
-    byte_test:1,&,0x80,2; \
-    threshold:type both, track by_dst, count 3, seconds 3; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/001; \
-    reference:url,https://nvd.nist.gov/vuln/detail/CVE-2008-1447; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000123; rev:1;)
-
+alert udp any 53 -> $HOME_NET any ( msg:"MITM-DNS: Multiple rapid DNS responses to same client - cache poisoning race attack"; byte_test:1,&,0x80,2; threshold:type both, track by_dst, count 3, seconds 3; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/001; reference:url,https://nvd.nist.gov/vuln/detail/CVE-2008-1447; metadata:attack_target Client, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, performance_impact Low, signature_severity High, confidence Medium; sid:9000123; rev:1;)
 
 # =============================================================================
 # SECTION 4: mDNS SPOOFING / BONJOUR / AVAHI POISONING (9000130–9000134)
@@ -354,50 +200,16 @@ alert udp any 53 -> $HOME_NET any ( \
 # SID 9000130: Unsolicited mDNS response (QR=1) — possible mDNS poisoning.
 # Port 5353/UDP; destination 224.0.0.251 (all-hosts mDNS multicast).
 # QR bit is bit 15 of the 2-byte flags field at offset 2 of DNS/mDNS header.
-alert udp any 5353 -> 224.0.0.251 5353 ( \
-    msg:"MITM-MDNS: Unsolicited mDNS response detected - possible Bonjour/Avahi poisoning"; \
-    byte_test:1,&,0x80,2; \
-    threshold:type threshold, track by_src, count 5, seconds 30; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/001; \
-    reference:url,https://tools.ietf.org/html/rfc6762; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, \
-        performance_impact Low, signature_severity Medium, confidence Medium; \
-    sid:9000130; rev:1;)
+alert udp any 5353 -> 224.0.0.251 5353 ( msg:"MITM-MDNS: Unsolicited mDNS response detected - possible Bonjour/Avahi poisoning"; byte_test:1,&,0x80,2; threshold:type threshold, track by_src, count 5, seconds 30; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/001; reference:url,https://tools.ietf.org/html/rfc6762; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, performance_impact Low, signature_severity Medium, confidence Medium; sid:9000130; rev:1;)
 
 # SID 9000131: mDNS response storm — >=20 responses in 60 s from single source.
 # responder and bettercap flood mDNS to maintain a poisoned cache entry.
-alert udp any 5353 -> 224.0.0.251 5353 ( \
-    msg:"MITM-MDNS: mDNS response flood from single source - Responder/bettercap tool pattern"; \
-    byte_test:1,&,0x80,2; \
-    threshold:type threshold, track by_src, count 20, seconds 60; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/001; \
-    reference:url,https://tools.ietf.org/html/rfc6762; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000131; rev:1;)
+alert udp any 5353 -> 224.0.0.251 5353 ( msg:"MITM-MDNS: mDNS response flood from single source - Responder/bettercap tool pattern"; byte_test:1,&,0x80,2; threshold:type threshold, track by_src, count 20, seconds 60; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/001; reference:url,https://tools.ietf.org/html/rfc6762; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, performance_impact Low, signature_severity High, confidence High; sid:9000131; rev:1;)
 
 # SID 9000132: mDNS response from unicast source (not 224.0.0.251).
 # RFC 6762 §6 requires responses to be sent to the mDNS multicast address.
 # A unicast mDNS response indicates a crafted packet or off-spec implementation.
-alert udp $HOME_NET 5353 -> $HOME_NET any ( \
-    msg:"MITM-MDNS: mDNS response sent via unicast - off-spec or crafted mDNS packet"; \
-    byte_test:1,&,0x80,2; \
-    threshold:type threshold, track by_src, count 5, seconds 60; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1557/001; \
-    reference:url,https://tools.ietf.org/html/rfc6762; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, \
-        performance_impact Low, signature_severity Medium, confidence Medium; \
-    sid:9000132; rev:1;)
-
+alert udp $HOME_NET 5353 -> $HOME_NET any ( msg:"MITM-MDNS: mDNS response sent via unicast - off-spec or crafted mDNS packet"; byte_test:1,&,0x80,2; threshold:type threshold, track by_src, count 5, seconds 60; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1557/001; reference:url,https://tools.ietf.org/html/rfc6762; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.001, mitre_technique_name LLMNR_NBT-NS_Poisoning_and_SMB_Relay, performance_impact Low, signature_severity Medium, confidence Medium; sid:9000132; rev:1;)
 
 # =============================================================================
 # SECTION 5: BGP HIJACKING (9000135–9000144)
@@ -424,95 +236,28 @@ alert udp $HOME_NET 5353 -> $HOME_NET any ( \
 # SID 9000135: BGP OPEN message — new peering session establishment.
 # Sets mitm.bgp_anomaly xbit for correlation with subsequent anomalous UPDATEs.
 # Legitimate BGP sessions are pre-configured; unexpected peers should alert.
-alert tcp any any -> any 179 ( \
-    msg:"MITM-BGP: BGP OPEN message from unexpected peer - new peering session"; \
-    flow:established,to_server; \
-    content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; \
-    content:"|00|"; offset:18; depth:19; \
-    byte_test:1,=,1,18; \
-    xbits:set,mitm.bgp_anomaly,track ip_src,expire 1800; \
-    threshold:type threshold, track by_src, count 1, seconds 3600; \
-    classtype:policy-violation; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc4271; \
-    metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000135; rev:1;)
+alert tcp any any -> any 179 ( msg:"MITM-BGP: BGP OPEN message from unexpected peer - new peering session"; flow:established,to_server; content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; content:"|00|"; offset:18; depth:19; byte_test:1,=,1,18; xbits:set,mitm.bgp_anomaly,track ip_src,expire 1800; threshold:type threshold, track by_src, count 1, seconds 3600; classtype:policy-violation; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc4271; metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence Medium; sid:9000135; rev:1;)
 
 # SID 9000136: BGP UPDATE message with invalid length (< 23 bytes violates RFC 4271 §4.1).
 # Minimum valid BGP message is 19 bytes (header only); minimum UPDATE with no
 # data is 23 bytes. A too-short UPDATE is malformed and indicates crafted BGP.
-alert tcp any any -> any 179 ( \
-    msg:"MITM-BGP: BGP UPDATE with invalid message length - malformed BGP packet"; \
-    flow:established,to_server; \
-    content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; \
-    byte_test:1,=,2,18; \
-    byte_test:2,<,23,16; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc4271; \
-    metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000136; rev:1;)
+alert tcp any any -> any 179 ( msg:"MITM-BGP: BGP UPDATE with invalid message length - malformed BGP packet"; flow:established,to_server; content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; byte_test:1,=,2,18; byte_test:2,<,23,16; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc4271; metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence High; sid:9000136; rev:1;)
 
 # SID 9000137: BGP UPDATE message rapid rate — route flapping attack.
 # Rapid successive UPDATE messages for the same peer indicate route flapping,
 # used to confuse route-reflectors and install transient fraudulent routes.
 # Threshold: >10 UPDATEs from same source in 30 s.
-alert tcp any any -> any 179 ( \
-    msg:"MITM-BGP: Rapid BGP UPDATE messages - route flapping / BGP hijack indicator"; \
-    flow:established,to_server; \
-    content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; \
-    byte_test:1,=,2,18; \
-    threshold:type threshold, track by_src, count 10, seconds 30; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc7454; \
-    metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000137; rev:1;)
+alert tcp any any -> any 179 ( msg:"MITM-BGP: Rapid BGP UPDATE messages - route flapping / BGP hijack indicator"; flow:established,to_server; content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; byte_test:1,=,2,18; threshold:type threshold, track by_src, count 10, seconds 30; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc7454; metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence Medium; sid:9000137; rev:1;)
 
 # SID 9000138: BGP NOTIFICATION message — indicates peer receiving error/session reset.
 # Unsolicited NOTIFICATIONs sent in bulk indicate an adversary attempting to
 # tear down legitimate BGP sessions, followed by rogue session establishment.
-alert tcp any any -> any 179 ( \
-    msg:"MITM-BGP: BGP NOTIFICATION message - peer session error or adversarial reset"; \
-    flow:established,to_server; \
-    content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; \
-    byte_test:1,=,3,18; \
-    threshold:type threshold, track by_src, count 3, seconds 60; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc4271; \
-    metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000138; rev:1;)
+alert tcp any any -> any 179 ( msg:"MITM-BGP: BGP NOTIFICATION message - peer session error or adversarial reset"; flow:established,to_server; content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; byte_test:1,=,3,18; threshold:type threshold, track by_src, count 3, seconds 60; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc4271; metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence Medium; sid:9000138; rev:1;)
 
 # SID 9000139: BGP UPDATE with total UPDATE length > 4096 (RFC 4271 §4 max = 4096).
 # A length field exceeding the maximum defined in the specification indicates
 # a crafted or fuzzing packet intended to exploit BGP implementation flaws.
-alert tcp any any -> any 179 ( \
-    msg:"MITM-BGP: BGP message length exceeds RFC maximum - crafted/fuzzing BGP packet"; \
-    flow:established,to_server; \
-    content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; \
-    byte_test:2,>,4096,16; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc4271; \
-    metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000139; rev:1;)
-
+alert tcp any any -> any 179 ( msg:"MITM-BGP: BGP message length exceeds RFC maximum - crafted/fuzzing BGP packet"; flow:established,to_server; content:"|FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF|"; depth:16; fast_pattern; byte_test:2,>,4096,16; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc4271; metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0008, mitre_tactic_name Lateral_Movement, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence High; sid:9000139; rev:1;)
 
 # =============================================================================
 # SECTION 6: IP SPOOFING (9000145–9000154)
@@ -536,105 +281,35 @@ alert tcp any any -> any 179 ( \
 # SID 9000145: RFC 1918 10/8 source IP on ingress from EXTERNAL_NET.
 # BCP 38 (RFC 2827) requires ISPs to filter RFC 1918 source addresses at edges.
 # IP ranges go in the rule header; ip.src is not a standalone keyword.
-alert ip 10.0.0.0/8 any -> $HOME_NET any ( \
-    msg:"MITM-IPSPOOFING: RFC 1918 10/8 source on public ingress - BCP38 violation / IP spoofing"; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc2827; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000145; rev:1;)
+alert ip 10.0.0.0/8 any -> $HOME_NET any ( msg:"MITM-IPSPOOFING: RFC 1918 10/8 source on public ingress - BCP38 violation / IP spoofing"; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc2827; metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence High; sid:9000145; rev:1;)
 
 # SID 9000146: RFC 1918 172.16/12 source on public ingress.
-alert ip 172.16.0.0/12 any -> $HOME_NET any ( \
-    msg:"MITM-IPSPOOFING: RFC 1918 172.16/12 source on public ingress - IP spoofing"; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc2827; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000146; rev:1;)
+alert ip 172.16.0.0/12 any -> $HOME_NET any ( msg:"MITM-IPSPOOFING: RFC 1918 172.16/12 source on public ingress - IP spoofing"; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc2827; metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence High; sid:9000146; rev:1;)
 
 # SID 9000147: RFC 1918 192.168/16 source on public ingress.
-alert ip 192.168.0.0/16 any -> $HOME_NET any ( \
-    msg:"MITM-IPSPOOFING: RFC 1918 192.168/16 source on public ingress - IP spoofing"; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc2827; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000147; rev:1;)
+alert ip 192.168.0.0/16 any -> $HOME_NET any ( msg:"MITM-IPSPOOFING: RFC 1918 192.168/16 source on public ingress - IP spoofing"; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc2827; metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence High; sid:9000147; rev:1;)
 
 # SID 9000148: Loopback source on any ingress — impossible on legitimate traffic.
 # 127.0.0.0/8 must never appear as a source address on the wire (RFC 6890).
-alert ip 127.0.0.0/8 any -> $HOME_NET any ( \
-    msg:"MITM-IPSPOOFING: Loopback source IP on ingress - spoofed packet"; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc6890; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity Critical, confidence High; \
-    sid:9000148; rev:1;)
+alert ip 127.0.0.0/8 any -> $HOME_NET any ( msg:"MITM-IPSPOOFING: Loopback source IP on ingress - spoofed packet"; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc6890; metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity Critical, confidence High; sid:9000148; rev:1;)
 
 # SID 9000149: IP fragmentation anomaly — DF=1 + fragment offset > 0.
 # The DF (Don't Fragment) bit and fragment offset > 0 are mutually exclusive.
 # A packet with DF=1 and offset > 0 is physically impossible and indicates
 # a hand-crafted spoofed or evasion-targeted packet (hping3 --frag --df).
-alert ip any any -> $HOME_NET any ( \
-    msg:"MITM-IPSPOOFING: Impossible IP fragmentation - DF=1 with fragment offset > 0"; \
-    fragbits:D; \
-    fragoffset:>0; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc791; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000149; rev:1;)
+alert ip any any -> $HOME_NET any ( msg:"MITM-IPSPOOFING: Impossible IP fragmentation - DF=1 with fragment offset > 0"; fragbits:D; fragoffset:>0; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc791; metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence High; sid:9000149; rev:1;)
 
 # SID 9000150: ICMP redirect from non-gateway source.
 # ICMP Type 5 (Redirect) is only legitimate from the default gateway.
 # An ICMP redirect from any other source is an IP spoofing / routing injection.
 # type:5 == ICMP_REDIRECT per IANA (RFC 792).
-alert icmp $HOME_NET any -> $HOME_NET any ( \
-    msg:"MITM-IPSPOOFING: ICMP redirect from non-gateway internal host - routing injection"; \
-    itype:5; \
-    threshold:type threshold, track by_src, count 3, seconds 60; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc792; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000150; rev:1;)
+alert icmp $HOME_NET any -> $HOME_NET any ( msg:"MITM-IPSPOOFING: ICMP redirect from non-gateway internal host - routing injection"; itype:5; threshold:type threshold, track by_src, count 3, seconds 60; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc792; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence High; sid:9000150; rev:1;)
 
 # SID 9000151: Extremely low TTL from external source (< 8).
 # A legitimate packet traversing the internet arrives with TTL typically 48–64+.
 # A TTL < 8 from an external host indicates either a local LAN spoof or a tool
 # (hping3 --ttl 1) generating crafted packets for MITM injection.
-alert ip $EXTERNAL_NET any -> $HOME_NET any ( \
-    msg:"MITM-IPSPOOFING: Very low TTL from external source - spoofed/crafted packet"; \
-    ttl:<8; \
-    threshold:type threshold, track by_src, count 5, seconds 60; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc791; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity Medium, confidence Medium; \
-    sid:9000151; rev:1;)
-
+alert ip $EXTERNAL_NET any -> $HOME_NET any ( msg:"MITM-IPSPOOFING: Very low TTL from external source - spoofed/crafted packet"; ttl:<8; threshold:type threshold, track by_src, count 5, seconds 60; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc791; metadata:attack_target Network, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity Medium, confidence Medium; sid:9000151; rev:1;)
 
 # =============================================================================
 # SECTION 7: SSL/TLS STRIPPING (HSTS BYPASS) (9000155–9000164)
@@ -655,19 +330,7 @@ alert ip $EXTERNAL_NET any -> $HOME_NET any ( \
 # SID 9000155: HTTP redirect with Location changing https:// scheme to http://.
 # The definitive SSL-strip indicator: a 30x response whose Location: header
 # starts with http:// instead of https:// for a resource that was originally HTTPS.
-alert http any any -> $HOME_NET any ( \
-    msg:"MITM-SSLSTRIP: HTTP redirect to HTTP (not HTTPS) Location - SSL stripping attack"; \
-    flow:established,to_client; \
-    http.stat_code; content:"30"; depth:2; \
-    http.location; content:"http://"; startswith; fast_pattern; nocase; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://nvd.nist.gov/vuln/detail/CVE-2009-1891; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Medium, signature_severity High, confidence Medium; \
-    sid:9000155; rev:1;)
+alert http any any -> $HOME_NET any ( msg:"MITM-SSLSTRIP: HTTP redirect to HTTP (not HTTPS) Location - SSL stripping attack"; flow:established,to_client; http.stat_code; content:"30"; depth:2; http.location; content:"http://"; startswith; fast_pattern; nocase; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://nvd.nist.gov/vuln/detail/CVE-2009-1891; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Medium, signature_severity High, confidence Medium; sid:9000155; rev:1;)
 
 # SID 9000156: HTTP response missing HSTS header on an otherwise HTTPS-capable page.
 # An SSL-stripping proxy actively removes the Strict-Transport-Security header
@@ -675,21 +338,7 @@ alert http any any -> $HOME_NET any ( \
 # Note: Many HTTP sites never send HSTS; tune to HTTPS-originated sessions only.
 # This rule fires when a TLS-established flow delivers an HTTP response that
 # lacks the Strict-Transport-Security header (HSTS stripping).
-alert http any any -> $HOME_NET any ( \
-    msg:"MITM-SSLSTRIP: HTTP response missing HSTS header on TLS-origin flow - HSTS stripping"; \
-    flow:established,to_client; \
-    http.stat_code; content:"200"; depth:3; \
-    http.response_body; content:"<html"; nocase; fast_pattern; \
-    http.header; content:!"Strict-Transport-Security"; \
-    threshold:type threshold, track by_src, count 5, seconds 60; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc6797; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Medium, signature_severity Medium, confidence Low; \
-    sid:9000156; rev:1;)
+alert http any any -> $HOME_NET any ( msg:"MITM-SSLSTRIP: HTTP response missing HSTS header on TLS-origin flow - HSTS stripping"; flow:established,to_client; http.stat_code; content:"200"; depth:3; http.response_body; content:"<html"; nocase; fast_pattern; http.header; content:!"Strict-Transport-Security"; threshold:type threshold, track by_src, count 5, seconds 60; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc6797; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Medium, signature_severity Medium, confidence Low; sid:9000156; rev:1;)
 
 # SID 9000157: Set-Cookie header without Secure flag over HTTP.
 # When SSL stripping is active, secure cookies (originally set via HTTPS with
@@ -697,74 +346,23 @@ alert http any any -> $HOME_NET any ( \
 # session tokens to network sniffing.
 # Note: Suricata sticky buffers (http.header) can only be used once per direction
 # block; combine both content matches under the same sticky buffer invocation.
-alert http any any -> $HOME_NET any ( \
-    msg:"MITM-SSLSTRIP: Set-Cookie without Secure flag over HTTP - cookie exposure via SSL strip"; \
-    flow:established,to_client; \
-    http.stat_code; content:"200"; depth:3; \
-    http.header; content:"Set-Cookie|3a|"; fast_pattern; nocase; \
-    threshold:type threshold, track by_src, count 5, seconds 60; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc6265; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Medium, signature_severity High, confidence Medium; \
-    sid:9000157; rev:1;)
+alert http any any -> $HOME_NET any ( msg:"MITM-SSLSTRIP: Set-Cookie without Secure flag over HTTP - cookie exposure via SSL strip"; flow:established,to_client; http.stat_code; content:"200"; depth:3; http.header; content:"Set-Cookie|3a|"; fast_pattern; nocase; threshold:type threshold, track by_src, count 5, seconds 60; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc6265; metadata:attack_target Client, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Medium, signature_severity High, confidence Medium; sid:9000157; rev:1;)
 
 # SID 9000158: HTTP traffic to sslstrip default listener port 8080 with proxy patterns.
 # sslstrip by default binds to port 8080 and iptables REDIRECT injects victim HTTP
 # traffic. Direct access to this port from internal hosts is anomalous.
-alert http $HOME_NET any -> $HOME_NET 8080 ( \
-    msg:"MITM-SSLSTRIP: HTTP traffic to local port 8080 - possible sslstrip proxy port"; \
-    flow:established,to_server; \
-    http.method; content:"GET"; fast_pattern; \
-    threshold:type threshold, track by_src, count 10, seconds 60; \
-    xbits:set,mitm.ssl_strip,track ip_src,expire 1800; \
-    classtype:policy-violation; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://nvd.nist.gov/vuln/detail/CVE-2009-1891; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity Medium, confidence Low; \
-    sid:9000158; rev:1;)
+alert http $HOME_NET any -> $HOME_NET 8080 ( msg:"MITM-SSLSTRIP: HTTP traffic to local port 8080 - possible sslstrip proxy port"; flow:established,to_server; http.method; content:"GET"; fast_pattern; threshold:type threshold, track by_src, count 10, seconds 60; xbits:set,mitm.ssl_strip,track ip_src,expire 1800; classtype:policy-violation; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://nvd.nist.gov/vuln/detail/CVE-2009-1891; metadata:attack_target Client, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity Medium, confidence Low; sid:9000158; rev:1;)
 
 # SID 9000159: TLS downgrade — ClientHello advertising TLS 1.3 but receiving TLS 1.0/1.1 ServerHello.
 # An active MITM proxy may negotiate a weaker TLS version with the origin while
 # presenting TLS 1.3 to the client (version downgrade attack).
 # tls.version in Suricata 7 matches the negotiated (ServerHello) version.
-alert tls $HOME_NET any -> any any ( \
-    msg:"MITM-SSLSTRIP: TLS 1.0 negotiated on outbound connection - possible TLS downgrade attack"; \
-    flow:established,to_server; \
-    tls.version:1.0; \
-    threshold:type threshold, track by_src, count 3, seconds 300; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc8996; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000159; rev:1;)
+alert tls $HOME_NET any -> any any ( msg:"MITM-SSLSTRIP: TLS 1.0 negotiated on outbound connection - possible TLS downgrade attack"; flow:established,to_server; tls.version:1.0; threshold:type threshold, track by_src, count 3, seconds 300; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc8996; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence Medium; sid:9000159; rev:1;)
 
 # SID 9000160: TLS 1.1 negotiated — deprecated per RFC 8996.
 # TLS 1.1 was deprecated in 2021. Active usage of TLS 1.1 in 2026 indicates
 # either a legacy misconfiguration or a downgrade forced by an intercepting proxy.
-alert tls $HOME_NET any -> any any ( \
-    msg:"MITM-SSLSTRIP: TLS 1.1 negotiated on outbound connection - deprecated protocol / possible downgrade"; \
-    flow:established,to_server; \
-    tls.version:1.1; \
-    threshold:type threshold, track by_src, count 3, seconds 300; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc8996; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity Medium, confidence Medium; \
-    sid:9000160; rev:1;)
-
+alert tls $HOME_NET any -> any any ( msg:"MITM-SSLSTRIP: TLS 1.1 negotiated on outbound connection - deprecated protocol / possible downgrade"; flow:established,to_server; tls.version:1.1; threshold:type threshold, track by_src, count 3, seconds 300; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc8996; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity Medium, confidence Medium; sid:9000160; rev:1;)
 
 # =============================================================================
 # SECTION 8: SESSION HIJACKING / SIDEJACKING (9000165–9000174)
@@ -785,86 +383,28 @@ alert tls $HOME_NET any -> any any ( \
 # Implementation: Two rules — one content-based fast path, one PCRE refinement.
 # The PCRE avoids semicolons in character classes (use [^S] approximation;
 # semicolons inside pcre would confuse the Suricata parser in rule text).
-alert http $HOME_NET any -> any any ( \
-    msg:"MITM-SESSIONHIJACK: Session cookie transmitted over HTTP - session exposure risk"; \
-    flow:established,to_server; \
-    http.header; content:"Cookie:"; nocase; fast_pattern; \
-    pcre:"/(?:PHPSESSID|JSESSIONID|session_token|auth_token|connect\.sid)=/i"; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1539; \
-    reference:url,https://tools.ietf.org/html/rfc6265; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1539, mitre_technique_name Steal_Web_Session_Cookie, \
-        performance_impact Medium, signature_severity High, confidence Medium; \
-    sid:9000165; rev:1;)
+alert http $HOME_NET any -> any any ( msg:"MITM-SESSIONHIJACK: Session cookie transmitted over HTTP - session exposure risk"; flow:established,to_server; http.header; content:"Cookie:"; nocase; fast_pattern; pcre:"/(?:PHPSESSID|JSESSIONID|session_token|auth_token|connect\.sid)=/i"; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1539; reference:url,https://tools.ietf.org/html/rfc6265; metadata:attack_target Client, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1539, mitre_technique_name Steal_Web_Session_Cookie, performance_impact Medium, signature_severity High, confidence Medium; sid:9000165; rev:1;)
 
 # SID 9000166: HTTP Basic/Bearer authentication over HTTP (not HTTPS).
 # Credentials transmitted in the Authorization header over HTTP are exposed
 # in cleartext — a direct session hijacking / sidejacking enabler.
-alert http $HOME_NET any -> any any ( \
-    msg:"MITM-SESSIONHIJACK: HTTP Authorization header transmitted over plaintext HTTP"; \
-    flow:established,to_server; \
-    http.header; content:"Authorization|3a|"; nocase; fast_pattern; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1539; \
-    reference:url,https://tools.ietf.org/html/rfc7617; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1539, mitre_technique_name Steal_Web_Session_Cookie, \
-        performance_impact Medium, signature_severity High, confidence Medium; \
-    sid:9000166; rev:1;)
+alert http $HOME_NET any -> any any ( msg:"MITM-SESSIONHIJACK: HTTP Authorization header transmitted over plaintext HTTP"; flow:established,to_server; http.header; content:"Authorization|3a|"; nocase; fast_pattern; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1539; reference:url,https://tools.ietf.org/html/rfc7617; metadata:attack_target Client, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1539, mitre_technique_name Steal_Web_Session_Cookie, performance_impact Medium, signature_severity High, confidence Medium; sid:9000166; rev:1;)
 
 # SID 9000167: Excessive TCP RST packets from same source — RST injection.
 # TCP RST injection terminates a victim's established session so the attacker
 # can replay the last valid sequence number in a hijacked connection.
 # Tools: tcpkill, hunt, ettercap RST injection mode.
-alert tcp any any -> $HOME_NET any ( \
-    msg:"MITM-SESSIONHIJACK: Excessive TCP RST packets - RST injection / session termination attack"; \
-    flow:established; \
-    flags:R; \
-    threshold:type threshold, track by_src, count 20, seconds 10; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    metadata:attack_target Server, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0040, mitre_tactic_name Impact, \
-        mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000167; rev:1;)
+alert tcp any any -> $HOME_NET any ( msg:"MITM-SESSIONHIJACK: Excessive TCP RST packets - RST injection / session termination attack"; flow:established; flags:R; threshold:type threshold, track by_src, count 20, seconds 10; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; metadata:attack_target Server, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0040, mitre_tactic_name Impact, mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, performance_impact Low, signature_severity High, confidence Medium; sid:9000167; rev:1;)
 
 # SID 9000168: Outbound HTTP POST with password/credential field names in body.
 # Detects plaintext credential forms submitted over HTTP (not HTTPS), which
 # exposes credentials to session sidejacking on the same network segment.
-alert http $HOME_NET any -> $EXTERNAL_NET any ( \
-    msg:"MITM-SESSIONHIJACK: Plaintext password submitted over HTTP - credential exposure"; \
-    flow:established,to_server; \
-    http.method; content:"POST"; \
-    http.request_body; content:"password="; nocase; fast_pattern; \
-    classtype:attempted-user; \
-    reference:url,attack.mitre.org/techniques/T1539; \
-    reference:url,https://owasp.org/Top10/A02_2021-Cryptographic_Failures/; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1539, mitre_technique_name Steal_Web_Session_Cookie, \
-        performance_impact Medium, signature_severity High, confidence Medium; \
-    sid:9000168; rev:1;)
+alert http $HOME_NET any -> $EXTERNAL_NET any ( msg:"MITM-SESSIONHIJACK: Plaintext password submitted over HTTP - credential exposure"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"password="; nocase; fast_pattern; classtype:attempted-user; reference:url,attack.mitre.org/techniques/T1539; reference:url,https://owasp.org/Top10/A02_2021-Cryptographic_Failures/; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1539, mitre_technique_name Steal_Web_Session_Cookie, performance_impact Medium, signature_severity High, confidence Medium; sid:9000168; rev:1;)
 
 # SID 9000169: TCP SYN to $HOME_NET with sequence number 0 (hping3 default).
 # hping3 --syn -S <target> generates SYN packets with seq=0, which is the
 # default when no --setseq is specified. Used for TCP session injection probing.
-alert tcp any any -> $HOME_NET any ( \
-    msg:"MITM-SESSIONHIJACK: TCP SYN with sequence number 0 - hping3 injection probe"; \
-    flags:S,12; \
-    seq:0; \
-    threshold:type threshold, track by_src, count 5, seconds 30; \
-    classtype:attempted-recon; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0043, mitre_tactic_name Reconnaissance, \
-        mitre_technique_id T1595, mitre_technique_name Active_Scanning, \
-        performance_impact Low, signature_severity Medium, confidence Medium; \
-    sid:9000169; rev:1;)
-
+alert tcp any any -> $HOME_NET any ( msg:"MITM-SESSIONHIJACK: TCP SYN with sequence number 0 - hping3 injection probe"; flags:S,12; seq:0; threshold:type threshold, track by_src, count 5, seconds 30; classtype:attempted-recon; reference:url,attack.mitre.org/techniques/T1557; metadata:attack_target Server, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0043, mitre_tactic_name Reconnaissance, mitre_technique_id T1595, mitre_technique_name Active_Scanning, performance_impact Low, signature_severity Medium, confidence Medium; sid:9000169; rev:1;)
 
 # =============================================================================
 # SECTION 9: BROWSER-IN-THE-MIDDLE (BitM) / REVERSE PROXY PHISHING (9000175–9000184)
@@ -887,118 +427,38 @@ alert tcp any any -> $HOME_NET any ( \
 # SID 9000175: Rapid 302/307 redirect chain from same source — reverse proxy indicator.
 # Legitimate servers issue at most 1–2 redirects. A BitM proxy generates a chain
 # of >=3 redirects in <5 s (client→phish→phish-proxy→origin redirects).
-alert http any any -> $HOME_NET any ( \
-    msg:"MITM-BITm: Multiple rapid HTTP redirects from same server - reverse proxy phishing"; \
-    flow:established,to_client; \
-    http.stat_code; content:"30"; depth:2; \
-    threshold:type both, track by_src, count 3, seconds 5; \
-    xbits:set,mitm.bitm_proxy,track ip_src,expire 1800; \
-    classtype:attempted-user; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,attack.mitre.org/techniques/T1539; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Medium, signature_severity High, confidence Medium; \
-    sid:9000175; rev:1;)
+alert http any any -> $HOME_NET any ( msg:"MITM-BITm: Multiple rapid HTTP redirects from same server - reverse proxy phishing"; flow:established,to_client; http.stat_code; content:"30"; depth:2; threshold:type both, track by_src, count 3, seconds 5; xbits:set,mitm.bitm_proxy,track ip_src,expire 1800; classtype:attempted-user; reference:url,attack.mitre.org/techniques/T1557; reference:url,attack.mitre.org/techniques/T1539; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Medium, signature_severity High, confidence Medium; sid:9000175; rev:1;)
 
 # SID 9000176: HTTP Location redirect to different domain than Host.
 # A legitimate redirect should return to the same domain or a known CDN.
 # BitM proxies rewrite Location: headers from legitimate.com to phish.com.
-alert http any any -> $HOME_NET any ( \
-    msg:"MITM-BITm: HTTP redirect Location points to different domain than Host - domain hijack"; \
-    flow:established,to_client; \
-    http.stat_code; content:"30"; depth:2; \
-    http.location; content:"://"; fast_pattern; \
-    classtype:attempted-user; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Medium, signature_severity Medium, confidence Low; \
-    sid:9000176; rev:1;)
+alert http any any -> $HOME_NET any ( msg:"MITM-BITm: HTTP redirect Location points to different domain than Host - domain hijack"; flow:established,to_client; http.stat_code; content:"30"; depth:2; http.location; content:"://"; fast_pattern; classtype:attempted-user; reference:url,attack.mitre.org/techniques/T1557; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Medium, signature_severity Medium, confidence Low; sid:9000176; rev:1;)
 
 # SID 9000177: X-Forwarded-For header in request from $HOME_NET to $EXTERNAL_NET.
 # X-Forwarded-For is injected by a proxy to indicate the original client IP.
 # Seeing this header originating from an internal client (not from a known CDN/proxy)
 # indicates an intermediate BitM proxy is silently relaying the connection.
-alert http $HOME_NET any -> $EXTERNAL_NET any ( \
-    msg:"MITM-BITm: Outbound HTTP request contains X-Forwarded-For - possible MITM proxy relay"; \
-    flow:established,to_server; \
-    http.header; content:"X-Forwarded-For|3a|"; nocase; fast_pattern; \
-    threshold:type threshold, track by_src, count 5, seconds 60; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Medium, signature_severity Medium, confidence Low; \
-    sid:9000177; rev:1;)
+alert http $HOME_NET any -> $EXTERNAL_NET any ( msg:"MITM-BITm: Outbound HTTP request contains X-Forwarded-For - possible MITM proxy relay"; flow:established,to_server; http.header; content:"X-Forwarded-For|3a|"; nocase; fast_pattern; threshold:type threshold, track by_src, count 5, seconds 60; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1557; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Medium, signature_severity Medium, confidence Low; sid:9000177; rev:1;)
 
 # SID 9000178: Evilginx2 / Modlishka user-agent signature.
 # Misconfigured or default Evilginx2/Modlishka deployments may leak their
 # tool name in the User-Agent or server response headers.
 # A content fast-pattern anchor is required before pcre (Suricata 7+).
-alert http any any -> any any ( \
-    msg:"MITM-BITm: Known phishing proxy tool identifier in HTTP headers - Evilginx2/Modlishka"; \
-    flow:established; \
-    http.header; content:"Evilginx"; nocase; fast_pattern; \
-    classtype:attempted-user; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,attack.mitre.org/techniques/T1539; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Medium, signature_severity Critical, confidence High; \
-    sid:9000178; rev:1;)
+alert http any any -> any any ( msg:"MITM-BITm: Known phishing proxy tool identifier in HTTP headers - Evilginx2/Modlishka"; flow:established; http.header; content:"Evilginx"; nocase; fast_pattern; classtype:attempted-user; reference:url,attack.mitre.org/techniques/T1557; reference:url,attack.mitre.org/techniques/T1539; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Medium, signature_severity Critical, confidence High; sid:9000178; rev:1;)
 
-alert http any any -> any any ( \
-    msg:"MITM-BITm: Modlishka reverse proxy tool identifier in HTTP headers"; \
-    flow:established; \
-    http.header; content:"Modlishka"; nocase; fast_pattern; \
-    classtype:attempted-user; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Medium, signature_severity Critical, confidence High; \
-    sid:9000209; rev:1;)
+alert http any any -> any any ( msg:"MITM-BITm: Modlishka reverse proxy tool identifier in HTTP headers"; flow:established; http.header; content:"Modlishka"; nocase; fast_pattern; classtype:attempted-user; reference:url,attack.mitre.org/techniques/T1557; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Medium, signature_severity Critical, confidence High; sid:9000209; rev:1;)
 
 # SID 9000179: TLS certificate with suspicious issuer — self-signed or test CA.
 # BitM proxies re-issue certificates under attacker-controlled CAs.
 # tls.cert_issuer is a sticky buffer (Suricata 7+); content match required.
-alert tls $HOME_NET any -> $EXTERNAL_NET 443 ( \
-    msg:"MITM-BITm: TLS certificate issued by localhost/test CA on HTTPS port - possible MITM"; \
-    flow:established,to_server; \
-    tls.cert_issuer; content:"localhost"; nocase; fast_pattern; \
-    classtype:protocol-command-decode; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000179; rev:1;)
+alert tls $HOME_NET any -> $EXTERNAL_NET 443 ( msg:"MITM-BITm: TLS certificate issued by localhost/test CA on HTTPS port - possible MITM"; flow:established,to_server; tls.cert_issuer; content:"localhost"; nocase; fast_pattern; classtype:protocol-command-decode; reference:url,attack.mitre.org/techniques/T1557; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence Medium; sid:9000179; rev:1;)
 
 # SID 9000180: HTTP POST to login/auth endpoint following BitM xbit correlation.
 # Once a BitM proxy is detected (mitm.bitm_proxy xbit set by SID 9000175),
 # any subsequent POST to a credential endpoint from the same source is
 # flagged as a likely credential harvesting action.
 # Direction: to_server (POST goes from client to server); source is $HOME_NET client.
-alert http $HOME_NET any -> any any ( \
-    msg:"MITM-BITm: Login POST after reverse proxy indicator xbit - credential harvesting"; \
-    flow:established,to_server; \
-    http.method; content:"POST"; fast_pattern; \
-    http.uri; pcre:"/(?:login|signin|auth|credential|account\/login)/i"; \
-    xbits:isset,mitm.bitm_proxy,track ip_dst; \
-    classtype:attempted-user; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,attack.mitre.org/techniques/T1539; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Medium, signature_severity Critical, confidence High; \
-    sid:9000180; rev:1;)
-
+alert http $HOME_NET any -> any any ( msg:"MITM-BITm: Login POST after reverse proxy indicator xbit - credential harvesting"; flow:established,to_server; http.method; content:"POST"; fast_pattern; http.uri; pcre:"/(?:login|signin|auth|credential|account\/login)/i"; xbits:isset,mitm.bitm_proxy,track ip_dst; classtype:attempted-user; reference:url,attack.mitre.org/techniques/T1557; reference:url,attack.mitre.org/techniques/T1539; metadata:attack_target Client, created_at 2026_04_06, deployment Perimeter, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Medium, signature_severity Critical, confidence High; sid:9000180; rev:1;)
 
 # =============================================================================
 # SECTION 10: MAC ADDRESS SPOOFING — IDENTITY THEFT (9000185–9000189)
@@ -1025,36 +485,12 @@ alert http $HOME_NET any -> any any ( \
 # Content pattern: ARP opcode 2 (offset 6–7 = 0x0002),
 #                  sender MAC first byte at offset 8 with LA bit set (|0x02|).
 # Using byte_test: offset 8, mask 0x02, test for != 0.
-alert arp any any -> any any ( \
-    msg:"MITM-MACSPOOFING: ARP reply with locally-administered source MAC - identity theft"; \
-    arp.opcode:2; \
-    byte_test:1,&,2,8; \
-    threshold:type threshold, track by_src, count 3, seconds 60; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/002; \
-    reference:url,https://standards.ieee.org/content/dam/ieee-standards/standards/web/documents/tutorials/eui.pdf; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, \
-        mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000185; rev:1;)
+alert arp any any -> any any ( msg:"MITM-MACSPOOFING: ARP reply with locally-administered source MAC - identity theft"; arp.opcode:2; byte_test:1,&,2,8; threshold:type threshold, track by_src, count 3, seconds 60; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/002; reference:url,https://standards.ieee.org/content/dam/ieee-standards/standards/web/documents/tutorials/eui.pdf; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, performance_impact Low, signature_severity High, confidence Medium; sid:9000185; rev:1;)
 
 # SID 9000186: Rapid IP address claim from multiple ARP sources — IP conflict flooding.
 # Same target IP receiving ARP claims (opcode 2) from multiple different sources
 # in a short window indicates MAC/IP spoofing to take over an IP identity.
-alert arp any any -> any any ( \
-    msg:"MITM-MACSPOOFING: Multiple ARP sources claiming same IP - IP identity theft"; \
-    arp.opcode:2; \
-    threshold:type both, track by_dst, count 3, seconds 20; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/002; \
-    reference:url,https://tools.ietf.org/html/rfc826; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, \
-        mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000186; rev:1;)
-
+alert arp any any -> any any ( msg:"MITM-MACSPOOFING: Multiple ARP sources claiming same IP - IP identity theft"; arp.opcode:2; threshold:type both, track by_dst, count 3, seconds 20; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/002; reference:url,https://tools.ietf.org/html/rfc826; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0005, mitre_tactic_name Defense_Evasion, mitre_technique_id T1557.002, mitre_technique_name ARP_Cache_Poisoning, performance_impact Low, signature_severity High, confidence High; sid:9000186; rev:1;)
 
 # =============================================================================
 # SECTION 11: MAC FLOODING — CAM TABLE EXHAUSTION (9000190–9000194)
@@ -1074,47 +510,17 @@ alert arp any any -> any any ( \
 # macof sends ARP/IP frames with random source MACs; even at the IDS this
 # produces a measurable spike. 500 ARP requests in 10 s far exceeds any
 # legitimate ARP behaviour (normal host: <10 ARP requests/minute).
-alert arp any any -> any any ( \
-    msg:"MITM-MACFLOOD: Extreme ARP request rate from single source - MAC flooding / CAM exhaustion"; \
-    arp.opcode:1; \
-    threshold:type threshold, track by_src, count 500, seconds 10; \
-    classtype:attempted-dos; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://attack.mitre.org/techniques/T1499; \
-    metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0040, mitre_tactic_name Impact, \
-        mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, \
-        performance_impact Low, signature_severity Critical, confidence High; \
-    sid:9000190; rev:1;)
+alert arp any any -> any any ( msg:"MITM-MACFLOOD: Extreme ARP request rate from single source - MAC flooding / CAM exhaustion"; arp.opcode:1; threshold:type threshold, track by_src, count 500, seconds 10; classtype:attempted-dos; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://attack.mitre.org/techniques/T1499; metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0040, mitre_tactic_name Impact, mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, performance_impact Low, signature_severity Critical, confidence High; sid:9000190; rev:1;)
 
 # SID 9000191: ARP combined request AND reply flood — >=200 packets/5 s.
 # Most MAC flood tools alternate between ARP requests and replies to maximise
 # CAM table entries. This rule catches the combined burst traffic pattern.
-alert arp any any -> any any ( \
-    msg:"MITM-MACFLOOD: High combined ARP request+reply rate - MAC flooding attack"; \
-    threshold:type threshold, track by_src, count 200, seconds 5; \
-    classtype:attempted-dos; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0040, mitre_tactic_name Impact, \
-        mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000191; rev:1;)
+alert arp any any -> any any ( msg:"MITM-MACFLOOD: High combined ARP request+reply rate - MAC flooding attack"; threshold:type threshold, track by_src, count 200, seconds 5; classtype:attempted-dos; reference:url,attack.mitre.org/techniques/T1557; metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0040, mitre_tactic_name Impact, mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, performance_impact Low, signature_severity High, confidence High; sid:9000191; rev:1;)
 
 # SID 9000192: UDP flood to broadcast with random source — hping3/macof UDP variant.
 # Some MAC flood tools send UDP frames to the broadcast address with randomised
 # source MACs, triggering ARP lookups for each unique source.
-alert udp any any -> 255.255.255.255 any ( \
-    msg:"MITM-MACFLOOD: UDP broadcast flood - possible MAC flood support traffic"; \
-    threshold:type threshold, track by_src, count 200, seconds 5; \
-    classtype:attempted-dos; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0040, mitre_tactic_name Impact, \
-        mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000192; rev:1;)
-
+alert udp any any -> 255.255.255.255 any ( msg:"MITM-MACFLOOD: UDP broadcast flood - possible MAC flood support traffic"; threshold:type threshold, track by_src, count 200, seconds 5; classtype:attempted-dos; reference:url,attack.mitre.org/techniques/T1557; metadata:attack_target Network_Infrastructure, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0040, mitre_tactic_name Impact, mitre_technique_id T1499, mitre_technique_name Endpoint_Denial_of_Service, performance_impact Low, signature_severity High, confidence Medium; sid:9000192; rev:1;)
 
 # =============================================================================
 # SECTION 12: ROGUE ACCESS POINT / EVIL TWIN (NETWORK-LAYER INDICATORS) (9000195–9000209)
@@ -1137,21 +543,7 @@ alert udp any any -> 255.255.255.255 any ( \
 # The rogue DHCP server source IP is usually in the victim subnet but on a different
 # host from the legitimate DHCP server. This rule fires on any OFFER from
 # $HOME_NET that the mitm.dhcp_rogue xbit has already been set for.
-alert udp $HOME_NET 67 -> any 68 ( \
-    msg:"MITM-ROGUEAP: DHCP OFFER from unexpected internal server - possible evil twin DHCP"; \
-    flow:to_client; \
-    content:"|02|"; offset:0; depth:1; \
-    content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; \
-    content:"|35 01 02|"; \
-    xbits:isset,mitm.dhcp_rogue,track ip_src; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/003; \
-    reference:url,https://tools.ietf.org/html/rfc2131; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, \
-        performance_impact Low, signature_severity High, confidence High; \
-    sid:9000195; rev:1;)
+alert udp $HOME_NET 67 -> any 68 ( msg:"MITM-ROGUEAP: DHCP OFFER from unexpected internal server - possible evil twin DHCP"; flow:to_client; content:"|02|"; offset:0; depth:1; content:"|63 82 53 63|"; offset:236; depth:240; fast_pattern; content:"|35 01 02|"; xbits:isset,mitm.dhcp_rogue,track ip_src; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/003; reference:url,https://tools.ietf.org/html/rfc2131; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, performance_impact Low, signature_severity High, confidence High; sid:9000195; rev:1;)
 
 # SID 9000196: DNS client query to non-standard resolver from $HOME_NET.
 # Clients connected to a rogue AP receive a malicious DNS server via DHCP Option 6.
@@ -1159,70 +551,26 @@ alert udp $HOME_NET 67 -> any 68 ( \
 # pool requires configuring $DNS_SERVERS. As a fallback, we detect DNS queries to
 # RFC 1918 addresses that do NOT match the common internal resolver address patterns.
 # Tune: Suppress this rule for your authorised internal resolver IPs.
-alert dns $HOME_NET any -> $HOME_NET 53 ( \
-    msg:"MITM-ROGUEAP: DNS query to unexpected internal resolver - possible rogue AP DNS redirect"; \
-    threshold:type threshold, track by_src, count 10, seconds 60; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/003; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, \
-        performance_impact Low, signature_severity Medium, confidence Low; \
-    sid:9000196; rev:1;)
+alert dns $HOME_NET any -> $HOME_NET 53 ( msg:"MITM-ROGUEAP: DNS query to unexpected internal resolver - possible rogue AP DNS redirect"; threshold:type threshold, track by_src, count 10, seconds 60; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/003; metadata:attack_target Client, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, performance_impact Low, signature_severity Medium, confidence Low; sid:9000196; rev:1;)
 
 # SID 9000197: HTTP captive-portal redirect — typical evil-twin AP pattern.
 # Evil twin APs redirect all TCP 80 connections through a captive portal to
 # harvest credentials. A server-side HTTP response with "captive" in Location
 # or body indicates this pattern.
-alert http any any -> $HOME_NET any ( \
-    msg:"MITM-ROGUEAP: Captive portal redirect detected - possible Evil Twin access point"; \
-    flow:established,to_client; \
-    http.stat_code; content:"30"; depth:2; \
-    http.location; content:"captive"; nocase; fast_pattern; \
-    classtype:attempted-user; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    metadata:attack_target Client, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000197; rev:1;)
+alert http any any -> $HOME_NET any ( msg:"MITM-ROGUEAP: Captive portal redirect detected - possible Evil Twin access point"; flow:established,to_client; http.stat_code; content:"30"; depth:2; http.location; content:"captive"; nocase; fast_pattern; classtype:attempted-user; reference:url,attack.mitre.org/techniques/T1557; metadata:attack_target Client, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence Medium; sid:9000197; rev:1;)
 
 # SID 9000198: ARP reply claiming gateway IP from new/unexpected MAC — rogue AP gateway takeover.
 # When a client associates with an evil twin, the rogue AP's MAC claims the
 # default gateway IP via ARP. Monitoring for arp.opcode:2 with high burst rate
 # against the broadcast destination is a strong signal.
 # Complement to SID 7100000 (base file) with tighter threshold.
-alert arp any any -> any any ( \
-    msg:"MITM-ROGUEAP: Burst ARP replies to broadcast - possible evil twin gateway impersonation"; \
-    arp.opcode:2; \
-    threshold:type both, track by_src, count 5, seconds 10; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557; \
-    reference:url,https://tools.ietf.org/html/rfc826; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, \
-        performance_impact Low, signature_severity High, confidence Medium; \
-    sid:9000198; rev:1;)
+alert arp any any -> any any ( msg:"MITM-ROGUEAP: Burst ARP replies to broadcast - possible evil twin gateway impersonation"; arp.opcode:2; threshold:type both, track by_src, count 5, seconds 10; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557; reference:url,https://tools.ietf.org/html/rfc826; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557, mitre_technique_name Adversary-in-the-Middle, performance_impact Low, signature_severity High, confidence Medium; sid:9000198; rev:1;)
 
 # SID 9000199: New DHCP server advertising on segment combined with ARP gateway change.
 # Two-rule correlation via xbits: SID 9000110 sets mitm.dhcp_rogue on new DHCP OFFER.
 # This rule fires when we see a new ARP storm (9000100 pattern) FROM THE SAME SOURCE
 # as the rogue DHCP OFFER — strong combined evil-twin indicator.
-alert arp any any -> any any ( \
-    msg:"MITM-ROGUEAP: ARP flood from same host as rogue DHCP OFFER - evil twin confirmed"; \
-    arp.opcode:2; \
-    xbits:isset,mitm.dhcp_rogue,track ip_src; \
-    threshold:type threshold, track by_src, count 5, seconds 30; \
-    classtype:bad-unknown; \
-    reference:url,attack.mitre.org/techniques/T1557/003; \
-    reference:url,attack.mitre.org/techniques/T1557/002; \
-    metadata:attack_target Network, created_at 2026_04_06, deployment Internal, \
-        mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, \
-        mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, \
-        performance_impact Low, signature_severity Critical, confidence High; \
-    sid:9000199; rev:1;)
-
+alert arp any any -> any any ( msg:"MITM-ROGUEAP: ARP flood from same host as rogue DHCP OFFER - evil twin confirmed"; arp.opcode:2; xbits:isset,mitm.dhcp_rogue,track ip_src; threshold:type threshold, track by_src, count 5, seconds 30; classtype:bad-unknown; reference:url,attack.mitre.org/techniques/T1557/003; reference:url,attack.mitre.org/techniques/T1557/002; metadata:attack_target Network, created_at 2026_04_06, deployment Internal, mitre_tactic_id TA0006, mitre_tactic_name Credential_Access, mitre_technique_id T1557.003, mitre_technique_name DHCP_Spoofing, performance_impact Low, signature_severity Critical, confidence High; sid:9000199; rev:1;)
 
 # =============================================================================
 # SUPPRESS / TUNING NOTES
